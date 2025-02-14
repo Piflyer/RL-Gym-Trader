@@ -1,3 +1,6 @@
+import gymnasium as gym
+import numpy as np
+import yfinance as yf
 
 class TradingEnv(gym.Env):
     def __init__(self, stock='AAPL', minbuy=10, gran='1d', period='max', shares=3, boughtat="2023-12-01", randomize=True, seed=0, verbose=False):
@@ -103,6 +106,8 @@ class TradingEnv(gym.Env):
             "current_action": self.current_action,
             "current_gain": self.relneworth,
             "diff": self.networth - self.init_networth,
+            "diff_norm" : (self.networth - self.init_networth) / self.init_networth,
+            "reward": self._reward(self.current_action),
             
         }
         return self.previous_obs, info
@@ -145,7 +150,8 @@ class TradingEnv(gym.Env):
             "current_action": self.current_action,
             "current_gain": self.relneworth,
             "diff": self.networth - self.init_networth,
-            
+            "diff_norm" : (self.networth - self.init_networth) / self.init_networth,
+            "reward": self._reward(self.current_action),
         }
         try:
             self.current_day = self.data.index[self.cur_indx]
