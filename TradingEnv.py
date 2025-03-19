@@ -2,7 +2,6 @@ import gymnasium as gym
 import numpy as np
 import yfinance as yf
 import sys
-
 class TradingEnv(gym.Env):
     def __init__(self, stock='AAPL', minbuy=10, gran='1d', period='max', shares=3, boughtat="2023-12-01", randomize=True, seed=0, verbose=False):
         super(TradingEnv, self).__init__()
