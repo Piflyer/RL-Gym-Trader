@@ -99,18 +99,16 @@ class TradingEnv(gym.Env):
         # --- Initial Data Fetch ---
         # Fetch only if not randomizing each episode (randomize handles its own fetch)
         if not self.randomize_episode:
-            print(f"[INFO] Initializing environment for fixed stock: {self.initial_stock}")
+            # print(f"[INFO] Initializing environment for fixed stock: {self.initial_stock}")
             if not self._fetch_data(self.initial_stock, self.period, self.granularity):
-                 raise RuntimeError(f"Failed to fetch initial data for {self.initial_stock}. Check warnings/errors above.")
+                raise RuntimeError(f"Failed to fetch initial data for {self.initial_stock}. Check warnings/errors above.")
             if not self._set_initial_buy_date(self.initial_buy_date_config):
-                 raise ValueError(f"Initial buy date {self.initial_buy_date_config} invalid or lacks sufficient history in fetched data for {self.initial_stock}.")
-        else:
-             print("[INFO] Environment configured for episode randomization.")
+                raise ValueError(f"Initial buy date {self.initial_buy_date_config} invalid or lacks sufficient history in fetched data for {self.initial_stock}.")
 
 
     def _fetch_data(self, stock_symbol, period, interval):
         """Fetches and merges data, converts index to timezone-naive."""
-        print(f"[INFO] Fetching data for {stock_symbol}, ^VIX, ^GSPC (Period: {period}, Interval: {interval})")
+        # print(f"[INFO] Fetching data for {stock_symbol}, ^VIX, ^GSPC (Period: {period}, Interval: {interval})")
         try:
             stock_ticker = yf.Ticker(stock_symbol)
             self.data = stock_ticker.history(period=period, interval=interval, auto_adjust=True)
@@ -145,12 +143,11 @@ class TradingEnv(gym.Env):
                 print(f"[WARNING] Insufficient merged data after processing for {stock_symbol} (Final Length: {len(self.merged_data)}, Required: {min_required_length}).")
                 return False
 
-            print(f"[INFO] Data fetched and processed successfully for {stock_symbol}. Final data length: {len(self.merged_data)}")
+            # print(f"[INFO] Data fetched and processed successfully for {stock_symbol}. Final data length: {len(self.merged_data)}")
             return True
 
         except Exception as e:
-            print(f"[ERROR] Exception during data fetch/process for {stock_symbol}: {e}")
-            traceback.print_exc()
+            # print(f"[ERROR] Exception during data fetch/process for {stock_symbol}: {e}")
             self.merged_data = pd.DataFrame()
             return False
 
@@ -176,7 +173,7 @@ class TradingEnv(gym.Env):
             for valid_date in valid_dates_after_request:
                  if self.merged_data.index.get_loc(valid_date) >= min_required_index_loc:
                      self.initial_buy_date = valid_date
-                     print(f"[INFO] Using closest valid date with sufficient history: {self.initial_buy_date.strftime('%Y-%m-%d')}")
+                    #  print(f"[INFO] Using closest valid date with sufficient history: {self.initial_buy_date.strftime('%Y-%m-%d')}")
                      return True # Found suitable date after requested
 
             print(f"[ERROR] Cannot find a suitable initial buy date >= {requested_date_str} with enough history ({min_required_index_loc} days).")
@@ -184,7 +181,6 @@ class TradingEnv(gym.Env):
 
         except Exception as e:
             print(f"[ERROR] Error setting initial buy date for '{requested_date_str}': {e}")
-            traceback.print_exc()
             return False
 
 
@@ -234,8 +230,8 @@ class TradingEnv(gym.Env):
                     self.initial_buy_date = self.merged_data.index[random_idx_loc] # Already naive
 
                     if isinstance(self.initial_buy_date, pd.Timestamp):
-                         print(f"[INFO] Randomization successful: Stock={self.current_stock}, Shares={self.initial_shares_config}, StartDate={self.initial_buy_date.strftime('%Y-%m-%d')}")
-                         return # Success
+                        #  print(f"[INFO] Randomization successful: Stock={self.current_stock}, Shares={self.initial_shares_config}, StartDate={self.initial_buy_date.strftime('%Y-%m-%d')}")
+                        return # Success
                     else: print(f"[WARNING] Random index location {random_idx_loc} did not yield valid date type. Retrying...")
                 else:
                     print(f"[WARNING] Not enough data range ({len(self.merged_data)} days) for randomization with {self.current_stock}. Retrying...")
@@ -283,8 +279,8 @@ class TradingEnv(gym.Env):
             padding_size = days - len(future_data)
             if len(future_data) > 0 and not pd.isna(future_data[-1]): padding_value = future_data[-1]
             else:
-                 current_val = self.merged_data.get(column, pd.Series(dtype=float)).iloc[self.current_step_index]
-                 padding_value = current_val if not pd.isna(current_val) else 0.0
+                current_val = self.merged_data.get(column, pd.Series(dtype=float)).iloc[self.current_step_index]
+                padding_value = current_val if not pd.isna(current_val) else 0.0
             padded_data = np.pad(future_data.astype(float), (0, padding_size), 'constant', constant_values=padding_value)
             return np.nan_to_num(padded_data.flatten(), nan=0.0)
 
@@ -349,107 +345,139 @@ class TradingEnv(gym.Env):
 
 
     def _reward(self, action):
-        """Calculates the reward for the given action taken at the current state."""
-        REWARD_SCALE=1.0; PROFIT_WEIGHT=0.8; STREAK_PENALTY_WEIGHT=0.2
-        HOLD_TOO_SHORT_PENALTY=-5.0; OPPORTUNITY_COST_SCALE=0.5
+        """
+        Revised Reward Structure with Negative Outcomes:
+        - When holding:
+            Reward = portfolio return (current price vs. bought price)
+                    minus a time penalty 
+                    minus a penalty proportional to the missed opportunity
+                    (i.e. how far the current unrealized profit is below the maximum observed).
+        - When not holding:
+            Reward = realized return (on networth) plus a term for the potential return
+                    (what the return would be if still holding) minus a small time penalty.
+        """
+        # Check valid index and current price
+        if not (0 <= self.current_step_index < len(self.merged_data)):
+            return 0.0
 
-        reward=0.0; profit_reward=0.0; streak_penalty=0.0
-
-        if not (0 <= self.current_step_index < len(self.merged_data)): return 0.0
         current_close = self.merged_data.iloc[self.current_step_index]['Close']
-        if pd.isna(current_close): return 0.0 # Cannot calculate reward with NaN price
+        if pd.isna(current_close):
+            return 0.0
+
+        # Define a time penalty for each day held
+        time_penalty = 0.001 * self.days_since_last_trade
+
+        # Weight factors (tune these as needed)
+        greedy_weight = 0.5    # Penalty for missed opportunity when holding
+        potential_weight = 0.5 # Weight for potential market return when not holding
 
         if self.has_position:
-            unrealized_gain = self.current_shares * (current_close - self.bought_price)
-            profit_reward = (unrealized_gain - self.current_holding_value)
-            initial_trade_value = self.current_shares * self.bought_price
-            profit_reward /= initial_trade_value if abs(initial_trade_value) > 1e-6 else 1.0
-        else: # Opportunity cost/gain
-            if self.current_step_index > 0:
-                previous_close = self.merged_data.iloc[self.current_step_index - 1]['Close']
-                if not pd.isna(previous_close) and abs(previous_close) > 1e-6:
-                    percentage_change = (current_close - previous_close) / previous_close
-                    profit_reward = -percentage_change * OPPORTUNITY_COST_SCALE
+            # Calculate portfolio return as percentage change from buy price
+            portfolio_return = (current_close - self.bought_price) / self.bought_price
+            
+            # Compute missed opportunity: difference between maximum unrealized profit and current profit, as a percentage of initial cost
+            cost = self.bought_price * self.current_shares
+            if cost == 0:
+                missed_profit_pct = 0.0
+            else:
+                missed_profit_pct = (self.max_profit_since_buy - self.current_holding_value) / cost
+            
+            # The reward is the actual return minus the time penalty and missed opportunity penalty.
+            reward = portfolio_return - time_penalty - greedy_weight * missed_profit_pct
 
-        if action == 1 and self.has_position and self.days_since_last_trade < self.min_hold_days:
-            streak_penalty = HOLD_TOO_SHORT_PENALTY
+        else:
+            # When not holding, calculate realized return from networth change
+            realized_return = (self.current_networth - self.initial_networth) / self.initial_networth
+            
+            # And consider potential market return if you had stayed in (this term can be negative)
+            potential_return = (current_close - self.bought_price) / self.bought_price
+            
+            # Combine realized and potential returns, then subtract a small time penalty.
+            reward = realized_return + potential_weight * potential_return - 0.1 * time_penalty
 
-        reward = (PROFIT_WEIGHT * profit_reward + STREAK_PENALTY_WEIGHT * streak_penalty)
-        reward = np.clip(reward * REWARD_SCALE, -10.0, 10.0)
-        return np.nan_to_num(reward, nan=0.0) # Ensure reward is never NaN
+        # For debugging, return the raw reward value to see negative values when appropriate.
+        return reward
 
 
     def step(self, action):
-        """Executes one time step within the environment."""
         if self.merged_data.empty or not (0 <= self.current_step_index < len(self.merged_data)):
-             obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-             return obs, 0.0, False, True, {"message": "Step called in invalid state."}
+            obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+            return obs, 0.0, False, True, {"message": "Step called in invalid state."}
 
-        reward = self._reward(action) # Calculated based on current state before action
+        reward = self._reward(action)  # Calculated based on current state before action
         action_taken = "Hold"
         current_price = self.merged_data.iloc[self.current_step_index]['Close']
 
         # Apply action logic
         if pd.isna(current_price):
-            action = 0; self.days_since_last_trade += 1
+            action = 0
+            self.days_since_last_trade += 1
             action_taken = "Hold (Forced due to NaN price)"
-            # Reward calculation already handled potential NaN
         elif action == 1:
-            if self.has_position: # Sell
+            self.days_since_last_trade = 0
+            self.max_profit_since_buy = 0.0
+            self.current_holding_value = 0.0
+            if self.has_position:  # Sell
+                # Use the original bought_price to calculate profit
                 profit = self.current_shares * (current_price - self.bought_price)
-                self.current_networth += profit; self.current_holding_value = 0.0
-                self.has_position = False; self.bought_price = 0.0; self.current_shares = 0
-                self.days_since_last_trade = 0; self.max_profit_since_buy = 0.0
+                self.current_networth += profit
+                self.has_position = False 
+                self.bought_price = current_price
                 action_taken = "Sell"
-            else: # Buy
+            else:  # Buy
                 self.current_shares = self.initial_shares_config
-                self.bought_price = current_price; self.has_position = True
-                self.days_since_last_trade = 0; self.max_profit_since_buy = 0.0
-                self.current_holding_value = 0.0; action_taken = "Buy"
-        else: # Hold
+                self.bought_price = current_price  # Set bought price here for a new position
+                self.has_position = True
+                action_taken = "Buy"
+        else:  # Hold
             self.days_since_last_trade += 1
             if self.has_position:
                 unrealized_gain = self.current_shares * (current_price - self.bought_price)
                 self.current_holding_value = unrealized_gain
                 self.max_profit_since_buy = max(self.max_profit_since_buy, unrealized_gain)
                 action_taken = "Hold (Position)"
-            else: action_taken = "Hold (No Position)"
+            else:
+                action_taken = "Hold (No Position)"
 
         # Advance time AFTER applying action and calculating reward for current state
         self.current_step_index += 1
 
         # Determine next state, termination, truncation
         terminated, truncated = False, False
-        observation = None; current_total_value = self.current_networth
-        current_price_final = np.nan # Price corresponding to the returned observation
-
-        if self.current_step_index >= len(self.merged_data):
-             truncated = True
-             last_valid_index = self.current_step_index - 1
-             self.current_step_index = last_valid_index # Revert for final obs calc
-             observation = self._get_observation()
-             self.current_step_index += 1 # Restore index
-             current_price_final = self.merged_data.iloc[last_valid_index]['Close']
-        else:
-            # Calculate value based on next day's price (for info dict)
+        observation = None
+        # if self.min_hold_days > 0 and self.days_since_last_trade < self.min_hold_days:
+        #     terminated = True
+        # print(f"[INFO] Minimum hold days not met. Current: {self.days_since_last_trade}, Required: {self.min_hold_days}")
+        # Compute portfolio value based on whether a position is held or not:
+        if self.current_step_index < len(self.merged_data):
             current_price_next_day = self.merged_data.iloc[self.current_step_index]['Close']
-            current_price_final = current_price_next_day
             if self.has_position and not pd.isna(current_price_next_day):
-                 current_total_value += self.current_shares * current_price_next_day
+                current_total_value = self.current_shares * current_price_next_day
+            else:
+                current_total_value = self.current_networth
+            current_price_final = current_price_next_day
 
-            # Check truncation based on future data needs for observation
             required_future_steps = 5 if self.use_privileged_obs else 1
             if self.current_step_index >= len(self.merged_data) - required_future_steps:
-                truncated = True # Truncate if not enough future data for next obs
+                truncated = True  # Truncate if not enough future data for next obs
 
-            # Get observation for the *new* state
             observation = self._get_observation()
+        else:
+            truncated = True
+            last_valid_index = self.current_step_index - 1
+            self.current_step_index = last_valid_index  # Revert for final obs calc
+            observation = self._get_observation()
+            self.current_step_index += 1  # Restore index
+            current_price_final = self.merged_data.iloc[last_valid_index]['Close']
+            current_total_value = self.current_networth
 
         # Gather Info dictionary
         info = {
             "timestamp": self.merged_data.index[self.current_step_index] if self.current_step_index < len(self.merged_data) else self.merged_data.index[-1],
-            "stock": self.current_stock, "action_taken": action_taken,
-            "start_networth": self.initial_networth, "current_total_value": current_total_value,
+            "stock": self.current_stock,
+            "action_taken": action_taken,
+            "start_networth": self.initial_networth, 
+            "current_total_value": current_total_value,
             "profit_loss": current_total_value - self.initial_networth,
             "profit_loss_pct": (current_total_value - self.initial_networth) / self.initial_networth if abs(self.initial_networth) > 1e-6 else 0.0,
             "current_price": np.nan_to_num(current_price_final, nan=0.0),
@@ -457,20 +485,20 @@ class TradingEnv(gym.Env):
             "days_held": self.days_since_last_trade if self.has_position else 0,
             "reward": reward,
         }
-        if observation is None: # Should only happen if error occurred
-             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
+        if observation is None:
+            observation = np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        # Optional verbose printing for step details
         if self.verbose and not (terminated or truncated):
-             print(f"Step: {self.current_step_index}, "
-                   f"Date: {info['timestamp'].strftime('%Y-%m-%d')}, "
-                   f"Action: {info['action_taken']}, "
-                   f"Next Price: {info['current_price']:.2f}, "
-                   f"Position: {info['has_position']}, "
-                   f"Total Value: {info['current_total_value']:.2f}, "
-                   f"Reward: {reward:.4f}")
+            print(f"Step: {self.current_step_index} \n"
+                f"Date: {info['timestamp'].strftime('%Y-%m-%d')} \n"
+                f"Action: {info['action_taken']} \n"
+                f"Next Price: {info['current_price']:.2f} \n"
+                f"Position: {info['has_position']} \n"
+                f"Total Value: {info['current_total_value']:.2f} \n"
+                f"Reward: {reward:.4f} \n" )
 
         return observation, reward, terminated, truncated, info
+
 
     def reset(self, seed=None, options=None):
         """Resets the environment to an initial state."""
@@ -485,11 +513,11 @@ class TradingEnv(gym.Env):
         else:
             # Fetch only if not already done (e.g., first reset)
             if self.merged_data.empty:
-                 print(f"[INFO] First reset for fixed stock {self.initial_stock}, fetching data...")
+                #  print(f"[INFO] First reset for fixed stock {self.initial_stock}, fetching data...")
                  if not self._fetch_data(self.initial_stock, self.period, self.granularity):
                       raise RuntimeError(f"Failed to fetch data for {self.initial_stock} during reset.")
-            else: # Data already exists, just ensure stock name is set
-                 print(f"[INFO] Resetting fixed environment: {self.initial_stock}")
+            # else: # Data already exists, just ensure stock name is set
+            #     #  print(f"[INFO] Resetting fixed environment: {self.initial_stock}")
             self.current_stock = self.initial_stock
             # Set/validate the initial buy date
             if not self._set_initial_buy_date(self.initial_buy_date_config):
