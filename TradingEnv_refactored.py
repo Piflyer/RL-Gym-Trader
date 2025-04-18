@@ -318,6 +318,11 @@ class TradingEnv(gym.Env):
         self.ticker_index += 1
         dones = [terminated, truncated]
         dones = torch.tensor(dones, dtype=torch.bool)
+        extras["current_timestep"] = self.current_timestep
+        extras["current_close"] = self.current_close
+        extras["current_holding_value"] = self.current_holding_value
+        extras["current_networth"] = self.current_networth
+        extras["current_step"] = self.current_timestep
         return observation, reward, dones, extras
     
     def _reward(self, action):
@@ -329,7 +334,10 @@ class TradingEnv(gym.Env):
         # if has_position try to maximize the current holding value and penalize if current holding is below max
         # if doesnt't have position, try to maximize loss 
         greedy_reward = 0
-        greedy_reward = self.current_holding_value - self.max_profit_since_buy/ self.max_profit_since_buy
+        if self.max_profit_since_buy != 0:
+            greedy_reward = self.current_holding_value - self.max_profit_since_buy/ self.max_profit_since_buy
+        else:
+            greedy_reward = 0.1
         if not self.has_position:
             greedy_reward = -greedy_reward
         
