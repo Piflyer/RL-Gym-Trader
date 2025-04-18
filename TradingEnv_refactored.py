@@ -39,7 +39,7 @@ class TradingEnv(gym.Env):
                 granularity='1d',
                 period='max',
                 randomize_episode=True,
-                use_privileged_obs=False,
+                use_privileged_obs=True,
                 seed=0,
                 max_episode_length=1000,
                 verbose=False):
@@ -74,7 +74,7 @@ class TradingEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
         
         # --- Observation Space ---
-        obs_shape_base = 47 # Base observation shape
+        obs_shape_base = 48 # Base observation shape
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_shape_base, 1), dtype=np.float32
         )
@@ -89,7 +89,7 @@ class TradingEnv(gym.Env):
         self.bought_price = 0.0 # Price at which the stock was bought
         self.current_holding_value = 0.0 # Current value of the holding
         self.days_since_last_trade = 0 # Days since the last trade
-        self.has_position = False # Whether the agent currently holds a position
+        self.has_position = True # Whether the agent currently holds a position
         self.max_profit_since_buy = 0.0 # Maximum profit since the stock was bought  
         self.ticker_index = 0 # Index of the current data index in the data
         self.current_close = 0.0 # Current close price of the stock
@@ -97,6 +97,19 @@ class TradingEnv(gym.Env):
         self.inital_bought_price = 0.0 # Price at which the stock was bought
         # ---- Fetch Data ----
         self._init_data()
+        obs, priv = self.get_observation()
+        extras = {}
+        extras["observations"] = {}
+        extras["observations"]["actor"] = obs
+        if self.use_privileged_obs:
+            extras["observations"]["critic"] = priv["observations"]["critic"]
+        extras["current_timestep"] = self.current_timestep
+        extras["current_close"] = self.current_close
+        extras["current_holding_value"] = self.current_holding_value
+        extras["current_networth"] = self.current_networth
+        extras["current_step"] = self.current_timestep   
+        extras["has_position"] = self.has_position       
+        return obs, extras
         
     def _fetch_data(self, stock, period):
         try:
@@ -186,8 +199,8 @@ class TradingEnv(gym.Env):
         if len(price_array) < 30:
             raise ValueError("Price array must have at least 30 elements.")
         
-        momentum_7 = (price_array[-1] - price_array[-8]) / price_array[-8]
-        momentum_30 = (price_array[-1] - price_array[-31]) / price_array[-31]
+        momentum_7 = (price_array[-1] - price_array[-7]) / price_array[-7]
+        momentum_30 = (price_array[-1] - price_array[-30]) / price_array[-30]
         
         return momentum_7, momentum_30
     
@@ -219,8 +232,8 @@ class TradingEnv(gym.Env):
         vix_5 = self._fetch_closing("vix", 5)
         gspc_5 = self._fetch_closing("gspc", 5)
         stock_7_momentum, stock_30_momentum = self._calculate_momentum(stock_30)
-        vix_7_momentum, vix_30_momentum = self._calculate_momentum(vix_5)
-        gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(gspc_5)
+        vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
+        gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
         current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price
         volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - self.merged_data['Volume'].iloc[self.ticker_index - 1]) / self.merged_data['Volume'].iloc[self.ticker_index - 1]
         
@@ -240,17 +253,20 @@ class TradingEnv(gym.Env):
             priv_stock = self._fetch_closing("stock", 5)
             priv_vix = self._fetch_closing("vix", 5)
             priv_gspc = self._fetch_closing("gspc", 5)
-            privileged_obs = np.concatenate(base_obs, [priv_stock, priv_vix, priv_gspc])
+            privileged_obs = np.concatenate([base_obs, priv_stock, priv_vix, priv_gspc])
             privileged_obs = np.reshape(privileged_obs, (-1, 1))
         
         base_obs = np.reshape(base_obs, (-1, 1))
         
         base_obs = torch.tensor(base_obs, dtype=torch.float32)
         extras = {}
+        extras["observations"] = {}
         extras["observations"]["actor"] = base_obs
         if self.use_privileged_obs:
             privileged_obs = torch.tensor(privileged_obs, dtype=torch.float32)
             extras['observations']['critic'] = privileged_obs
+        else:
+            extras['observations']['critic'] = base_obs
         
         return base_obs, extras
         
@@ -305,7 +321,7 @@ class TradingEnv(gym.Env):
         self.max_profit_since_buy = max(self.max_profit_since_buy, self.current_holding_value)
         reward = self._reward(action)
         reward = torch.tensor(reward, dtype=torch.float32)
-        if self.action == 1:
+        if action == 1:
             self.has_position != self.has_position
             self.current_holding_value = 0 # cleanup after buy/sell
             self.max_profit_since_buy = 0 # cleanup after buy/sell
@@ -323,6 +339,7 @@ class TradingEnv(gym.Env):
         extras["current_holding_value"] = self.current_holding_value
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep
+        extras["has_position"] = self.has_position
         return observation, reward, dones, extras
     
     def _reward(self, action):
@@ -365,7 +382,10 @@ class TradingEnv(gym.Env):
         
         
         
-        
+if __name__ == "__main__":
+    env = TradingEnv()
+    obs, extras = env.reset()
+    breakpoint()
         
         
         
