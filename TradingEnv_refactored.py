@@ -34,7 +34,7 @@ class TradingEnv(gym.Env):
     def __init__(self,
                 stock='AAPL',
                 initial_shares=3,
-                initial_buy_date="2023-12-01",
+                initial_buy_date="2023-12-03",
                 min_hold_days=10,
                 granularity='1d',
                 period='max',
@@ -46,6 +46,8 @@ class TradingEnv(gym.Env):
         super().__init__()
         
         # ---- Initialize parameters ---- 
+        self.current_stock = "" # Current stock being traded
+        self.initial_buy_date = "" # Initial buy date
         self.stock = stock
         self.initial_shares = initial_shares
         self.initial_buy_date = initial_buy_date
@@ -54,7 +56,6 @@ class TradingEnv(gym.Env):
         self.period = period
         self.randomize_episode = randomize_episode
         self.use_privileged_obs = use_privileged_obs
-        self.seed(seed)
         self.verbose = verbose
         self.max_episode_length = max_episode_length
         
@@ -68,10 +69,20 @@ class TradingEnv(gym.Env):
             "NVDA", "AMZN", "GOOGL", "MSFT", "AAPL", "META", "ADBE",
             "NFLX", "VOO", "FTEC", "TSLA", "JPM", "V", "UNH"
         ]
-
+        
+        # --- Action Space ---
+        self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
+        
+        # --- Observation Space ---
+        obs_shape_base = 47 # Base observation shape
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_shape_base, 1), dtype=np.float32
+        )
+        self.reset(seed=None, options=None)
+        
+    
+    def reset(self, seed=None, options=None):
         # ---- Action Space ----
-        self.current_stock = "" # Current stock being traded
-        self.initial_buy_date = "" # Initial buy date
         self.current_timestep = 0 # Current timestep
         self.initial_networth = 0.0 # Initial net worth
         self.current_networth = 0.0 # Current net worth cumulated
@@ -84,26 +95,14 @@ class TradingEnv(gym.Env):
         self.current_close = 0.0 # Current close price of the stock
         self.sold_price = 0.0 # Price at which the stock was sold
         self.inital_bought_price = 0.0 # Price at which the stock was bought
-        
-        # --- Action Space ---
-        self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
-        
-        # --- Observation Space ---
-        obs_shape_base = 46 # Base observation shape
-        obs_shape_total = obs_shape_base + 15 if self.use_privileged_obs else obs_shape_base
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_shape_total,), dtype=np.float32
-        )
-        
         # ---- Fetch Data ----
         self._init_data()
-        
         
     def _fetch_data(self, stock, period):
         try:
             stock_ticker = yf.Ticker(stock)
             self.stock_data = stock_ticker.history(period=period, auto_adjust=True)
-            if self.data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
+            if self.stock_data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
 
             vix_ticker = yf.Ticker("^VIX")
             self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
@@ -113,7 +112,7 @@ class TradingEnv(gym.Env):
             self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
             if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
 
-            stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.data.empty else pd.DataFrame(index=self.stock_data.index)
+            stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.stock_data.empty else pd.DataFrame(index=self.stock_data.index)
             vix_df = self.vix_data[['Close']].rename(columns={'Close': 'VIX_Close'}).copy() if not self.vix_data.empty else pd.DataFrame(index=self.vix_data.index)
             gspc_df = self.gspc_data[['Close']].rename(columns={'Close': 'GSPC_Close'}).copy() if not self.gspc_data.empty else pd.DataFrame(index=self.gspc_data.index)
 
@@ -152,7 +151,7 @@ class TradingEnv(gym.Env):
             self._randomize_data()
         else:
             self._fetch_data(self.stock, self.period)
-            self.ticker_index = self.merged_data.index.get_loc(pd.to_datetime(self.initial_buy_date))
+            self.ticker_index = self.merged_data.index.get_loc(pd.to_datetime(self.initial_buy_date).date())
             self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
             self.current_networth = self.initial_networth
             self.current_holding_value = self.initial_networth
@@ -269,11 +268,12 @@ class TradingEnv(gym.Env):
         """
         
         action = action.item()
-        self.current_timestep += 1
-        self.ticker_index += 1
         self.current_close = self.merged_data['Close'].iloc[self.ticker_index]
         self.current_holding_value = (self.current_close - self.bought_price) * self.initial_shares
-        dones = False
+        terminated = False
+        truncated = False
+        if self.current_timestep == 0:
+            self.inital_bought_price = self.current_close
 
         if action == 0:
             self.sold_price = 0
@@ -283,7 +283,7 @@ class TradingEnv(gym.Env):
             self.days_since_last_trade = 0
             if self.has_position:
                 if self.days_since_last_trade < self.min_hold_days:
-                    dones = True
+                    terminated = True
                 self.current_networth += self.current_holding_value
                 self.sold_price =  self.current_close
                 # self.current_holding_value = 0
@@ -292,14 +292,14 @@ class TradingEnv(gym.Env):
             else:
                 self.bought_price = self.current_close
                 if self.current_networth < self.current_close * self.initial_shares:
-                    dones = True
+                    terminated = True
                 # self.current_holding_value = 0
                 self.sold_price = self.current_close
                 self.days_since_last_trade = 0
         
         # Check if the episode is done
         if self.current_timestep >= self.max_episode_length:
-            dones = True
+            truncated = True
         
         # Calculate the reward
         self.max_profit_since_buy = max(self.max_profit_since_buy, self.current_holding_value)
@@ -312,10 +312,13 @@ class TradingEnv(gym.Env):
         
         # Get the next observation
         observation, extras = self.get_observation()
+        
+        # Update the current timestep
+        self.current_timestep += 1
+        self.ticker_index += 1
+        dones = [terminated, truncated]
+        dones = torch.tensor(dones, dtype=torch.bool)
         return observation, reward, dones, extras
-    
-    def reset(self, seed=None, options=None):
-        self.inital_bought_price #close price
     
     def _reward(self, action):
         """Calculates the reward based on the current state.
@@ -348,21 +351,8 @@ class TradingEnv(gym.Env):
         
         #clip the reward
         reward = np.clip(reward, -5, 5)
-        return reward
         
-        
-
-        
-        
-        
-            
-
-            
-        
-        
-        #Calculate gain to 
-    
-        
+        return reward  
         
         
         
