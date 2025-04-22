@@ -7,6 +7,20 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 import torch
+from time import time
+
+import requests_cache
+import datetime
+
+cache_name = 'yfinance_cache'
+expire_after = datetime.timedelta(days=1) # Cache expires after 1 day
+
+# Create a cached session
+session = requests_cache.CachedSession(
+    cache_name=cache_name,
+    backend='sqlite',
+    expire_after=expire_after
+)
 
 # Suppress specific pandas warnings if necessary (optional)
 # warnings.filterwarnings("ignore", category=FutureWarning, module="pandas.core.indexing")
@@ -42,6 +56,9 @@ class TradingEnv(gym.Env):
                 use_privileged_obs=True,
                 seed=0,
                 max_episode_length=1000,
+                device="cpu",
+                rl_platform="SB3",
+                debug=False,
                 verbose=False):
         super().__init__()
         
@@ -54,10 +71,14 @@ class TradingEnv(gym.Env):
         self.min_hold_days = min_hold_days
         self.granularity = granularity
         self.period = period
+        self.device = device
         self.randomize_episode = randomize_episode
         self.use_privileged_obs = use_privileged_obs
         self.verbose = verbose
         self.max_episode_length = max_episode_length
+        self.rl_platform = rl_platform
+        self.debug = debug
+        
         
         # ---- Stock Data Placeholder ----
         self.stock_data = None
@@ -80,8 +101,26 @@ class TradingEnv(gym.Env):
         )
         self.reset(seed=None, options=None)
         
+        # for RSL_RL compatibility
+        self.num_actions = self.action_space.n
+        self.num_observations = self.observation_space.shape[0]
+        self.num_envs = 32 # Number of environments for RSL_RL
+        self.cfg = {
+            "env": {
+                "num_envs": self.num_envs,
+                "num_actions": self.num_actions,
+                "num_observations": self.num_observations,
+                "action_space": self.action_space,
+                "observation_space": self.observation_space,
+                "max_episode_length": self.max_episode_length,
+                "is_privileged": self.use_privileged_obs,
+            }
+        }
+        
+        
     
     def reset(self, seed=None, options=None):
+        start = time()
         # ---- Action Space ----
         self.current_timestep = 0 # Current timestep
         self.initial_networth = 0.0 # Initial net worth
@@ -95,9 +134,10 @@ class TradingEnv(gym.Env):
         self.current_close = 0.0 # Current close price of the stock
         self.sold_price = 0.0 # Price at which the stock was sold
         self.inital_bought_price = 0.0 # Price at which the stock was bought
+        self.cum_gain = 0.0 # Cumulative gain since the start of the episode
         # ---- Fetch Data ----
         self._init_data()
-        obs, priv = self.get_observation()
+        obs, priv = self.get_observations()
         extras = {}
         extras["observations"] = {}
         extras["observations"]["actor"] = obs
@@ -108,20 +148,28 @@ class TradingEnv(gym.Env):
         extras["current_holding_value"] = self.current_holding_value
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep   
-        extras["has_position"] = self.has_position       
-        return obs, extras
+        extras["has_position"] = self.has_position
+        self.inital_bought_price = self.merged_data['Close'].iloc[self.ticker_index]
+        self.current_close = self.merged_data['Close'].iloc[self.ticker_index]
+        end = time()
+        if self.debug:
+            print(f"Reset Time: {end - start:.4f}s")
+        if self.rl_platform == "SB3":
+            return obs.numpy(), extras
+        else:
+            return obs, extras
         
     def _fetch_data(self, stock, period):
         try:
-            stock_ticker = yf.Ticker(stock)
+            stock_ticker = yf.Ticker(stock, session=session)
             self.stock_data = stock_ticker.history(period=period, auto_adjust=True)
             if self.stock_data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
 
-            vix_ticker = yf.Ticker("^VIX")
+            vix_ticker = yf.Ticker("^VIX", session=session)
             self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
             if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
 
-            gspc_ticker = yf.Ticker("^GSPC")
+            gspc_ticker = yf.Ticker("^GSPC", session=session)
             self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
             if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
 
@@ -150,7 +198,7 @@ class TradingEnv(gym.Env):
         """
         self.current_stock = np.random.choice(self.random_symbols)
         self._fetch_data(self.current_stock, 'max')
-        self.ticker_index = np.random.randint(0, len(self.merged_data) - self.max_episode_length)
+        self.ticker_index = np.random.randint(30, len(self.merged_data) - self.max_episode_length)
         self.initial_buy_date = self.merged_data.index[self.ticker_index]
         self.initial_shares = np.random.randint(1, 11)
         self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
@@ -159,7 +207,6 @@ class TradingEnv(gym.Env):
         self.bought_price = self.merged_data['Close'].iloc[self.ticker_index]
     
     def _init_data(self):
-        self._fetch_data(self.stock, self.period)
         if self.randomize_episode:
             self._randomize_data()
         else:
@@ -181,11 +228,11 @@ class TradingEnv(gym.Env):
         
         # get the closing prices for the stock from self.ticker_index - period 
         if stock == "stock":
-            return self.merged_data['Close'].iloc[self.ticker_index:self.ticker_index + period].values
+            return self.merged_data['Close'].iloc[self.ticker_index - period:self.ticker_index].values
         if stock == "vix":
-            return self.merged_data['VIX_Close'].iloc[self.ticker_index:self.ticker_index + period].values
+            return self.merged_data['VIX_Close'].iloc[self.ticker_index - period:self.ticker_index].values
         if stock == "gspc":
-            return self.merged_data['GSPC_Close'].iloc[self.ticker_index:self.ticker_index + period].values
+            return self.merged_data['GSPC_Close'].iloc[self.ticker_index - period:self.ticker_index].values
         else:
             raise ValueError(f"Invalid stock name: {stock}. Must be 'stock', 'vix', or 'gspc'.")
     
@@ -204,7 +251,7 @@ class TradingEnv(gym.Env):
         
         return momentum_7, momentum_30
     
-    def get_observation(self):
+    def get_observations(self):
         """Get the current observation. 
         The observation includes:
         - Past 30 closing prices of the stock (30)
@@ -271,6 +318,7 @@ class TradingEnv(gym.Env):
         return base_obs, extras
         
     def step(self, action):
+        start = time()
         """Takes in an action and returns the next observation, reward, done, and info.
         0: Hold, 1: Buy/Sell
         
@@ -282,8 +330,8 @@ class TradingEnv(gym.Env):
             done (bool): Whether the episode is done.
             info (dict): Additional information about the step.
         """
-        
-        action = action.item()
+        if type(action) == torch.Tensor:
+            action = action.item()
         self.current_close = self.merged_data['Close'].iloc[self.ticker_index]
         self.current_holding_value = (self.current_close - self.bought_price) * self.initial_shares
         terminated = False
@@ -298,8 +346,8 @@ class TradingEnv(gym.Env):
         else:
             self.days_since_last_trade = 0
             if self.has_position:
-                if self.days_since_last_trade < self.min_hold_days:
-                    terminated = True
+                # if self.days_since_last_trade < self.min_hold_days:
+                #     terminated = True
                 self.current_networth += self.current_holding_value
                 self.sold_price =  self.current_close
                 # self.current_holding_value = 0
@@ -313,21 +361,28 @@ class TradingEnv(gym.Env):
                 self.sold_price = self.current_close
                 self.days_since_last_trade = 0
         
+        if self.current_networth < self.initial_networth * 0.9:
+            terminated = True
+        
         # Check if the episode is done
         if self.current_timestep >= self.max_episode_length:
             truncated = True
         
         # Calculate the reward
-        self.max_profit_since_buy = max(self.max_profit_since_buy, self.current_holding_value)
+        if self.has_position:
+            self.max_profit_since_buy = max(self.max_profit_since_buy, self.current_holding_value)
+            prev_close = self.merged_data['Close'].iloc[self.ticker_index - 1]
+            self.cum_gain += (self.current_close - prev_close) * self.initial_shares
+        else:
+            self.max_profit_since_buy = max(self.max_profit_since_buy, -self.current_holding_value)
         reward = self._reward(action)
-        reward = torch.tensor(reward, dtype=torch.float32)
         if action == 1:
-            self.has_position != self.has_position
+            self.has_position = not self.has_position
             self.current_holding_value = 0 # cleanup after buy/sell
             self.max_profit_since_buy = 0 # cleanup after buy/sell
         
         # Get the next observation
-        observation, extras = self.get_observation()
+        observation, extras = self.get_observations()
         
         # Update the current timestep
         self.current_timestep += 1
@@ -340,7 +395,14 @@ class TradingEnv(gym.Env):
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep
         extras["has_position"] = self.has_position
-        return observation, reward, dones, extras
+        end = time()
+        if self.debug:
+            print(f"Step Time: {end - start:.4f}s")
+        if self.rl_platform == "SB3":
+            return observation.numpy(), reward, terminated, truncated, extras
+        else:
+            reward = torch.tensor(reward, dtype=torch.float32)
+            return observation, reward, dones, extras
     
     def _reward(self, action):
         """Calculates the reward based on the current state.
@@ -350,29 +412,32 @@ class TradingEnv(gym.Env):
         #Greedy Reward: trying to maximize the current net worth through each step
         # if has_position try to maximize the current holding value and penalize if current holding is below max
         # if doesnt't have position, try to maximize loss 
-        greedy_reward = 0
-        if self.max_profit_since_buy != 0:
-            greedy_reward = self.current_holding_value - self.max_profit_since_buy/ self.max_profit_since_buy
-        else:
-            greedy_reward = 0.1
-        if not self.has_position:
-            greedy_reward = -greedy_reward
+        self.greedy_reward = 0
+        if self.max_profit_since_buy != 0 and self.has_position:
+            self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy)/ self.max_profit_since_buy
+        if self.max_profit_since_buy != 0 and not self.has_position:
+            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy)/ self.max_profit_since_buy
+        if self.max_profit_since_buy == 0:
+            self.greedy_reward = 0.3
         
         
         
         # Calculate the the current networth gain to if just held the stock
-        holding = (self.current_close - self.inital_bought_price) / self.inital_bought_price
-        holding_reward = (self.current_networth - holding) / holding
+        self.holding = (self.current_close - self.inital_bought_price) * self.initial_shares
+        if self.has_position and self.holding != 0:   
+            self.holding_reward = (self.cum_gain - self.holding) / abs(self.holding)
+        else:
+            self.holding_reward = 0.1
         
         #penalty for selling too early:
-        min_hold_penalty = 0
-        if self.days_since_last_trade < self.min_hold_days:
-            min_hold_penalty = (self.days_since_last_trade - self.min_hold_days) / self.min_hold_days
+        self.min_hold_penalty = 0
+        if (self.days_since_last_trade < self.min_hold_days) and action == 1:
+            self.min_hold_penalty = (self.days_since_last_trade - self.min_hold_days) / self.min_hold_days
         
         # consturct the reward
         
         
-        reward = 0.5* greedy_reward + 0.5*holding_reward - 0.2*min_hold_penalty
+        reward = 2.0* self.greedy_reward + 3.0*self.holding_reward + 2.0 * self.min_hold_penalty
         
         #clip the reward
         reward = np.clip(reward, -5, 5)
@@ -383,9 +448,22 @@ class TradingEnv(gym.Env):
         
         
 if __name__ == "__main__":
-    env = TradingEnv()
+    env = TradingEnv(debug=True)
     obs, extras = env.reset()
-    breakpoint()
+    for j in range(20):
+        action = env.action_space.sample()
+        obs, reward, done, truncated, extras = env.step(action)
+        print(f"Step: {j}")
+        print(f"Action: {action}")
+        print(f"Observation: {obs}")
+        print(f"Reward: {reward}")
+        print(f"Done: {done}")
+        breakpoint()
+        if done:
+            break
+        
+            
+            
         
         
         

@@ -2,8 +2,23 @@ import gymnasium as gym
 import numpy as np
 import yfinance as yf
 import sys
+from time import time
+import requests_cache
+import datetime
+
+cache_name = 'yfinance_cache'
+expire_after = datetime.timedelta(days=1) # Cache expires after 1 day
+
+# Create a cached session
+session = requests_cache.CachedSession(
+    cache_name=cache_name,
+    backend='sqlite',
+    expire_after=expire_after
+)
+
+
 class TradingEnv(gym.Env):
-    def __init__(self, stock='AAPL', minbuy=10, gran='1d', period='max', shares=3, boughtat="2023-12-01", randomize=True, seed=0, verbose=False):
+    def __init__(self, stock='AAPL', minbuy=10, gran='1d', period='max', shares=3, boughtat="2023-12-01", randomize=True, seed=0, verbose=False, debug=False):
         super(TradingEnv, self).__init__()
         self.running_mean = 0
         self.running_std = 1  
@@ -22,6 +37,7 @@ class TradingEnv(gym.Env):
         self.print = verbose
         self.streak = 0
         self.is_init = True
+        self.debug = debug
         
         if self.gran in ['5m', '15m', '30m']:
             print("[WARNING] Data granularity can only go back to 60 Days Maxiumum")
@@ -93,6 +109,7 @@ class TradingEnv(gym.Env):
                 continue
     
     def reset(self, seed=0):
+        start = time()
         super(TradingEnv, self).reset()
         if self.randomize:
             self._randomize()
@@ -110,6 +127,9 @@ class TradingEnv(gym.Env):
             "reward": self._reward(self.current_action),
             
         }
+        end = time()
+        if self.debug:
+            print(f"[DEBUG] Reset Time: {end - start:.2f} seconds")
         return self.previous_obs, info
     
     def _calculate_momentum(self, interval):
@@ -199,6 +219,9 @@ class TradingEnv(gym.Env):
         self.prev_obs = observation
 
         # Termination terms
+        if self.streak < self.minbuy:
+            terminated = True
+        
         if self.networth < (self.init_networth * 0.90):
             # print("[INFO] Terminated due to Loss")
             terminated = True
@@ -270,4 +293,13 @@ class TradingEnv(gym.Env):
     
     def close(self):
         pass
-    
+
+if __name__ == "__main__":
+    env = TradingEnv(debug=True)
+    env.reset()
+    for _ in range(1000):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        if terminated or truncated:
+            env.reset()
+            print("Resetting environment")
