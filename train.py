@@ -18,7 +18,7 @@ def linear_schedule(initial_value):
     return func
 
 log_dir = "./tensorboard_logs_refactored/"
-n_envs = 32
+n_envs = 16
 n_steps = 1000
 batch_size = 128
 ent_coef = 0.02

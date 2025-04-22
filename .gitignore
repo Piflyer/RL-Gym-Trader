@@ -229,3 +229,14 @@ tensorboard_logs_test/stock_ppo_10/events.out.tfevents.1745034490.Mac.4844.1
 tensorboard_logs_test/stock_ppo_11/events.out.tfevents.1745034764.Mac.9119.1
 tensorboard_logs_test/stock_ppo_12/events.out.tfevents.1745071552.Tims-MacBook-Pro-2.local.57055.1
 yfinance_cache.sqlite
+tensorboard_logs_refactored/events.out.tfevents.1745300066.crc-dot1x-nat-10-239-141-34.bu.edu.11978.0
+tensorboard_logs_refactored/events.out.tfevents.1745300383.crc-dot1x-nat-10-239-141-34.bu.edu.17194.0
+tensorboard_logs_refactored/events.out.tfevents.1745301946.crc-dot1x-nat-10-239-141-34.bu.edu.35708.0
+tensorboard_logs_refactored/events.out.tfevents.1745301987.crc-dot1x-nat-10-239-141-34.bu.edu.36275.0
+tensorboard_logs_refactored/events.out.tfevents.1745302156.crc-dot1x-nat-10-239-141-34.bu.edu.38290.0
+tensorboard_logs_refactored/events.out.tfevents.1745302168.crc-dot1x-nat-10-239-141-34.bu.edu.38658.0
+tensorboard_logs_refactored/events.out.tfevents.1745302904.crc-dot1x-nat-10-239-141-34.bu.edu.46778.0
+tensorboard_logs_refactored/stock_ppo_13/events.out.tfevents.1745300426.crc-dot1x-nat-10-239-141-34.bu.edu.17194.1
+tensorboard_logs_refactored/stock_ppo_14/events.out.tfevents.1745302002.crc-dot1x-nat-10-239-141-34.bu.edu.36275.1
+tensorboard_logs_refactored/stock_ppo_15/events.out.tfevents.1745302175.crc-dot1x-nat-10-239-141-34.bu.edu.38658.1
+tensorboard_logs_refactored/stock_ppo_16/events.out.tfevents.1745302913.crc-dot1x-nat-10-239-141-34.bu.edu.46778.1

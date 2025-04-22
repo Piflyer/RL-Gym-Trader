@@ -59,6 +59,7 @@ class TradingEnv(gym.Env):
                 device="cpu",
                 rl_platform="SB3",
                 debug=False,
+                extra_obs=False,
                 verbose=False):
         super().__init__()
         
@@ -78,6 +79,7 @@ class TradingEnv(gym.Env):
         self.max_episode_length = max_episode_length
         self.rl_platform = rl_platform
         self.debug = debug
+        self.extra_obs = extra_obs
         
         
         # ---- Stock Data Placeholder ----
@@ -96,6 +98,8 @@ class TradingEnv(gym.Env):
         
         # --- Observation Space ---
         obs_shape_base = 48 # Base observation shape
+        if not self.extra_obs:
+            obs_shape_base -= 14 # Remove extra observations
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_shape_base, 1), dtype=np.float32
         )
@@ -165,21 +169,25 @@ class TradingEnv(gym.Env):
             self.stock_data = stock_ticker.history(period=period, auto_adjust=True)
             if self.stock_data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
 
-            vix_ticker = yf.Ticker("^VIX", session=session)
-            self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
-            if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
+            if self.extra_obs:
+                vix_ticker = yf.Ticker("^VIX", session=session)
+                self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
+                if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
 
-            gspc_ticker = yf.Ticker("^GSPC", session=session)
-            self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
-            if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
+                gspc_ticker = yf.Ticker("^GSPC", session=session)
+                self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
+                if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
 
-            stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.stock_data.empty else pd.DataFrame(index=self.stock_data.index)
-            vix_df = self.vix_data[['Close']].rename(columns={'Close': 'VIX_Close'}).copy() if not self.vix_data.empty else pd.DataFrame(index=self.vix_data.index)
-            gspc_df = self.gspc_data[['Close']].rename(columns={'Close': 'GSPC_Close'}).copy() if not self.gspc_data.empty else pd.DataFrame(index=self.gspc_data.index)
+                stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.stock_data.empty else pd.DataFrame(index=self.stock_data.index)
+                vix_df = self.vix_data[['Close']].rename(columns={'Close': 'VIX_Close'}).copy() if not self.vix_data.empty else pd.DataFrame(index=self.vix_data.index)
+                gspc_df = self.gspc_data[['Close']].rename(columns={'Close': 'GSPC_Close'}).copy() if not self.gspc_data.empty else pd.DataFrame(index=self.gspc_data.index)
 
-            self.merged_data = pd.concat([stock_df, vix_df, gspc_df], axis=1, join='outer')
-            if 'Close' not in self.merged_data.columns and not stock_df.empty:
-                print("[ERROR] Primary stock 'Close' column missing after outer join.")
+                self.merged_data = pd.concat([stock_df, vix_df, gspc_df], axis=1, join='outer')
+                if 'Close' not in self.merged_data.columns and not stock_df.empty:
+                    print("[ERROR] Primary stock 'Close' column missing after outer join.")
+            else:
+                stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.stock_data.empty else pd.DataFrame(index=self.stock_data.index)
+                self.merged_data = stock_df
 
             self.merged_data = self.merged_data.groupby(self.merged_data.index.date).first()
             self.merged_data = self.merged_data.dropna()
@@ -276,31 +284,43 @@ class TradingEnv(gym.Env):
         """
         
         stock_30 = self._fetch_closing("stock", 30)
-        vix_5 = self._fetch_closing("vix", 5)
-        gspc_5 = self._fetch_closing("gspc", 5)
         stock_7_momentum, stock_30_momentum = self._calculate_momentum(stock_30)
-        vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
-        gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
+        if self.extra_obs:
+            vix_5 = self._fetch_closing("vix", 5)
+            gspc_5 = self._fetch_closing("gspc", 5)
+            vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
+            gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
         current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price
         volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - self.merged_data['Volume'].iloc[self.ticker_index - 1]) / self.merged_data['Volume'].iloc[self.ticker_index - 1]
         
         # Privileged observation
-        base_obs = np.concatenate([
-            stock_30,
-            vix_5,
-            gspc_5,
-            [stock_7_momentum, stock_30_momentum],
-            [vix_7_momentum, vix_30_momentum],
-            [gspc_7_momentum, gspc_30_momentum],
-            [current_relative_gain],
-            [volume_change]
-        ])
+        if self.extra_obs:
+            base_obs = np.concatenate([
+                stock_30,
+                vix_5,
+                gspc_5,
+                [stock_7_momentum, stock_30_momentum],
+                [vix_7_momentum, vix_30_momentum],
+                [gspc_7_momentum, gspc_30_momentum],
+                [current_relative_gain],
+                [volume_change]
+            ])
+        else:
+            base_obs = np.concatenate([
+                stock_30,
+                [stock_7_momentum, stock_30_momentum],
+                [current_relative_gain],
+                [volume_change]
+            ])
         
         if self.use_privileged_obs:
             priv_stock = self._fetch_closing("stock", 5)
-            priv_vix = self._fetch_closing("vix", 5)
-            priv_gspc = self._fetch_closing("gspc", 5)
-            privileged_obs = np.concatenate([base_obs, priv_stock, priv_vix, priv_gspc])
+            if self.extra_obs:
+                priv_vix = self._fetch_closing("vix", 5)
+                priv_gspc = self._fetch_closing("gspc", 5)
+                privileged_obs = np.concatenate([base_obs, priv_stock, priv_vix, priv_gspc])
+            else:
+                privileged_obs = np.concatenate([base_obs, priv_stock])
             privileged_obs = np.reshape(privileged_obs, (-1, 1))
         
         base_obs = np.reshape(base_obs, (-1, 1))
@@ -450,17 +470,12 @@ class TradingEnv(gym.Env):
 if __name__ == "__main__":
     env = TradingEnv(debug=True)
     obs, extras = env.reset()
-    for j in range(20):
+    for j in range(100):
         action = env.action_space.sample()
         obs, reward, done, truncated, extras = env.step(action)
-        print(f"Step: {j}")
-        print(f"Action: {action}")
-        print(f"Observation: {obs}")
-        print(f"Reward: {reward}")
-        print(f"Done: {done}")
-        breakpoint()
-        if done:
-            break
+        if done or truncated:
+            obs, extras = env.reset()
+            
         
             
             
