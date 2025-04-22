@@ -228,3 +228,4 @@ tensorboard_logs_test/events.out.tfevents.1745071403.Tims-MacBook-Pro-2.local.57
 tensorboard_logs_test/stock_ppo_10/events.out.tfevents.1745034490.Mac.4844.1
 tensorboard_logs_test/stock_ppo_11/events.out.tfevents.1745034764.Mac.9119.1
 tensorboard_logs_test/stock_ppo_12/events.out.tfevents.1745071552.Tims-MacBook-Pro-2.local.57055.1
+yfinance_cache.sqlite
