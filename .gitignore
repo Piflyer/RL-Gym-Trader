@@ -253,3 +253,6 @@ tensorboard_logs_refactored/events.out.tfevents.1745512512.crc-dot1x-nat-10-239-
 tensorboard_logs_refactored/events.out.tfevents.1745512768.crc-dot1x-nat-10-239-141-34.bu.edu.15055.0
 tensorboard_logs_refactored/stock_ppo_20/events.out.tfevents.1745512521.crc-dot1x-nat-10-239-141-34.bu.edu.11491.1
 tensorboard_logs_refactored/stock_ppo_21/events.out.tfevents.1745512775.crc-dot1x-nat-10-239-141-34.bu.edu.15055.1
+__pycache__/RSLTradingEnv.cpython-311.pyc
+tensorboard_logs_refactored/events.out.tfevents.1745515283.crc-dot1x-nat-10-239-141-34.bu.edu.45639.0
+tensorboard_logs_refactored/stock_ppo_22/events.out.tfevents.1745515348.crc-dot1x-nat-10-239-141-34.bu.edu.45639.1

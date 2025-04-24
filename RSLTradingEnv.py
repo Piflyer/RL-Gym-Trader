@@ -62,7 +62,7 @@ class TradingEnv(gym.Env):
                 device="cpu",
                 rl_platform="SB3",
                 debug=False,
-                extra_obs=False,
+                extra_obs=True,
                 verbose=False):
         super().__init__()
         
@@ -89,6 +89,7 @@ class TradingEnv(gym.Env):
         self.stock_data = None
         self.vix_data = None
         self.gspc_data = 0
+        self.merged_data = None
         
         # --- Randomization Options ---
         self.random_symbols = [
@@ -97,8 +98,16 @@ class TradingEnv(gym.Env):
         ]
         
         # TODO: refactor fetch data to do front load and be more efficient with caching
-        # if self.randomize_episode:
-        #     self.all_stock_data = {symbol: self._fetch_data(symbol) for symbol in self.random_symbols}
+        vix_ticker = yf.Ticker("^VIX", session=session)
+        self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
+        if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
+
+        gspc_ticker = yf.Ticker("^GSPC", session=session)
+        self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
+        if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
+        
+        if self.randomize_episode:
+            self.all_stock_data = {symbol: self._batch_fetch_data(symbol, self.period) for symbol in self.random_symbols}
         
         # --- Action Space ---
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
@@ -173,7 +182,41 @@ class TradingEnv(gym.Env):
             return obs.numpy(), extras
         else:
             return obs, extras
-        
+    
+    def _batch_fetch_data(self, stock, period):
+        # print(f"[INFO] Fetching data for {stock}...")
+        try:
+            stock_ticker = yf.Ticker(stock, session=session)
+            stock_data = stock_ticker.history(period=period, auto_adjust=True)
+            if self.extra_obs:
+                stock_df = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not stock_data.empty else pd.DataFrame(index=stock_data.index)
+                vix_df = self.vix_data[['Close']].rename(columns={'Close': 'VIX_Close'}).copy() if not self.vix_data.empty else pd.DataFrame(index=self.vix_data.index)
+                gspc_df = self.gspc_data[['Close']].rename(columns={'Close': 'GSPC_Close'}).copy() if not self.gspc_data.empty else pd.DataFrame(index=self.gspc_data.index)
+                merged_data = pd.concat([stock_df, vix_df, gspc_df], axis=1, join='outer')
+                if 'Close' not in merged_data.columns and not stock_df.empty:
+                    print("[ERROR] Primary stock 'Close' column missing after outer join.")
+            else:
+                stock_df = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not stock_data.empty else pd.DataFrame(index=stock_data.index)
+                merged_data = stock_df
+            merged_data = merged_data.groupby(merged_data.index.date).first()
+            merged_data.index = pd.to_datetime(merged_data.index) # Ensure index is datetime
+            
+            merged_data = merged_data.ffill(limit=3)
+            # Handle NaNs in critical columns
+            if 'Volume' in merged_data.columns:
+                merged_data['Volume'].fillna(0.0, inplace=True) # Fill NaN volume with 0
+            merged_data.dropna(subset=['Close'], inplace=True) # Drop rows ONLY if 'Close' is missing
+
+            min_required_length = 35 + self.max_episode_length
+            if len(merged_data) < min_required_length:
+                print(f"[WARNING] Insufficient merged data after processing for {stock} (Final Length: {len(self.merged_data)}, Required: {min_required_length}).")
+                return None
+            
+            return merged_data
+        except Exception as e:
+            print(f"[ERROR] Exception during data fetch/process for {stock}: {e}")
+            return None
+    
     def _fetch_data(self, stock, period):
         try:
             stock_ticker = yf.Ticker(stock, session=session)
@@ -181,14 +224,6 @@ class TradingEnv(gym.Env):
             if self.stock_data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
 
             if self.extra_obs:
-                vix_ticker = yf.Ticker("^VIX", session=session)
-                self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
-                if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
-
-                gspc_ticker = yf.Ticker("^GSPC", session=session)
-                self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
-                if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
-
                 stock_df = self.stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not self.stock_data.empty else pd.DataFrame(index=self.stock_data.index)
                 vix_df = self.vix_data[['Close']].rename(columns={'Close': 'VIX_Close'}).copy() if not self.vix_data.empty else pd.DataFrame(index=self.vix_data.index)
                 gspc_df = self.gspc_data[['Close']].rename(columns={'Close': 'GSPC_Close'}).copy() if not self.gspc_data.empty else pd.DataFrame(index=self.gspc_data.index)
@@ -229,9 +264,15 @@ class TradingEnv(gym.Env):
         Randomizes the stock data and initial buy date for each episode.
         """
         self.current_stock = np.random.choice(self.random_symbols)
-        if not self._fetch_data(self.current_stock, 'max'):
+        
+        self.merged_data = self.all_stock_data[self.current_stock]
+        if self.merged_data is None or self.merged_data.empty:
             print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
             self.reset()
+        
+        # if not self._fetch_data(self.current_stock, 'max'):
+        #     print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
+        #     self.reset()
         self.ticker_index = np.random.randint(30, len(self.merged_data) - self.max_episode_length - 5)
         self.initial_buy_date = self.merged_data.index[self.ticker_index]
         self.initial_shares = np.random.randint(1, 11)
@@ -244,7 +285,8 @@ class TradingEnv(gym.Env):
         if self.randomize_episode:
             self._randomize_data()
         else:
-            if not self._fetch_data(self.stock, self.period):
+            self.merged_data = self._batch_fetch_data(self.stock, self.period)
+            if self.merged_data is None or self.merged_data.empty:
                 print(f"[ERROR] Failed to fetch data for {self.stock}.")
                 # end the episode
                 # return
@@ -531,14 +573,9 @@ class TradingEnv(gym.Env):
         
         
         
-if __name__ == "__main__":
-    env = TradingEnv(debug=True)
-    obs, extras = env.reset()
-    for j in range(100):
-        action = env.action_space.sample()
-        obs, reward, done, truncated, extras = env.step(action)
-        if done or truncated:
-            obs, extras = env.reset()
+
+    
+    
             
         
             
