@@ -195,18 +195,23 @@ class TradingEnv(gym.Env):
             min_required_length = 35 + self.max_episode_length
             if len(self.merged_data) < min_required_length:
                 print(f"[WARNING] Insufficient merged data after processing for {stock} (Final Length: {len(self.merged_data)}, Required: {min_required_length}).")
-
+                return False
+            
+            return True
         except Exception as e:
             print(f"[ERROR] Exception during data fetch/process for {stock}: {e}")
             self.merged_data = pd.DataFrame()
+            return False
         
     def _randomize_data(self):
         """
         Randomizes the stock data and initial buy date for each episode.
         """
         self.current_stock = np.random.choice(self.random_symbols)
-        self._fetch_data(self.current_stock, 'max')
-        self.ticker_index = np.random.randint(30, len(self.merged_data) - self.max_episode_length)
+        if not self._fetch_data(self.current_stock, 'max'):
+            print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
+            self.reset()
+        self.ticker_index = np.random.randint(30, len(self.merged_data) - self.max_episode_length - 5)
         self.initial_buy_date = self.merged_data.index[self.ticker_index]
         self.initial_shares = np.random.randint(1, 11)
         self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
@@ -218,7 +223,10 @@ class TradingEnv(gym.Env):
         if self.randomize_episode:
             self._randomize_data()
         else:
-            self._fetch_data(self.stock, self.period)
+            if not self._fetch_data(self.stock, self.period):
+                print(f"[ERROR] Failed to fetch data for {self.stock}.")
+                # end the episode
+                return
             self.ticker_index = self.merged_data.index.get_loc(pd.to_datetime(self.initial_buy_date).date())
             self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
             self.current_networth = self.initial_networth
@@ -245,19 +253,26 @@ class TradingEnv(gym.Env):
             raise ValueError(f"Invalid stock name: {stock}. Must be 'stock', 'vix', or 'gspc'.")
     
     def _calculate_momentum(self, price_array):
-        """ Calculates the momentum of a given price array.
-        Args:
-            price_array (np.ndarray): An array of closing prices.
-        Returns:
-            tuple: A tuple containing the 7-day and 30-day momentum values.
-        """
         if len(price_array) < 30:
-            raise ValueError("Price array must have at least 30 elements.")
-        
-        momentum_7 = (price_array[-1] - price_array[-7]) / price_array[-7]
-        momentum_30 = (price_array[-1] - price_array[-30]) / price_array[-30]
-        
+            # Return 0.0 or handle as appropriate if not enough data
+            return 0.0, 0.0 # Or raise an error earlier
+
+        momentum_7 = 0.0
+        denom_7 = price_array[-7]
+        if not pd.isna(denom_7) and abs(denom_7) > 1e-9: # Check for NaN and near-zero
+            momentum_7 = (price_array[-1] - denom_7) / denom_7
+
+        momentum_30 = 0.0
+        denom_30 = price_array[-30]
+        if not pd.isna(denom_30) and abs(denom_30) > 1e-9: # Check for NaN and near-zero
+            momentum_30 = (price_array[-1] - denom_30) / denom_30
+
+        # Replace potential inf/-inf with 0 (or a large capped value)
+        momentum_7 = np.nan_to_num(momentum_7, nan=0.0, posinf=0.0, neginf=0.0)
+        momentum_30 = np.nan_to_num(momentum_30, nan=0.0, posinf=0.0, neginf=0.0)
+
         return momentum_7, momentum_30
+
     
     def get_observations(self):
         """Get the current observation. 
@@ -291,7 +306,11 @@ class TradingEnv(gym.Env):
             vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
             gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
         current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price
-        volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - self.merged_data['Volume'].iloc[self.ticker_index - 1]) / self.merged_data['Volume'].iloc[self.ticker_index - 1]
+        current_relative_gain = np.nan_to_num(current_relative_gain, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.merged_data['Volume'].iloc[self.ticker_index - 1] == 0:
+            volume_change = 0
+        else:
+            volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - self.merged_data['Volume'].iloc[self.ticker_index - 1]) / self.merged_data['Volume'].iloc[self.ticker_index - 1]
         
         # Privileged observation
         if self.extra_obs:
@@ -324,12 +343,14 @@ class TradingEnv(gym.Env):
             privileged_obs = np.reshape(privileged_obs, (-1, 1))
         
         base_obs = np.reshape(base_obs, (-1, 1))
-        
+        base_obs = np.nan_to_num(base_obs, nan=0.0, posinf=0.0, neginf=0.0) 
         base_obs = torch.tensor(base_obs, dtype=torch.float32)
         extras = {}
         extras["observations"] = {}
         extras["observations"]["actor"] = base_obs
         if self.use_privileged_obs:
+            privileged_obs = np.reshape(privileged_obs, (-1, 1))
+            privileged_obs = np.nan_to_num(privileged_obs, nan=0.0, posinf=0.0, neginf=0.0) 
             privileged_obs = torch.tensor(privileged_obs, dtype=torch.float32)
             extras['observations']['critic'] = privileged_obs
         else:
@@ -460,7 +481,7 @@ class TradingEnv(gym.Env):
         reward = 2.0* self.greedy_reward + 3.0*self.holding_reward + 2.0 * self.min_hold_penalty
         
         #clip the reward
-        reward = np.clip(reward, -5, 5)
+        reward = np.clip(reward, -10, 7)
         
         return reward  
         
