@@ -1,0 +1,17 @@
+name: "TradingEnv_NonPrivileged"
+rl_platform: "SB3"
+period: "max"
+num_envs: 32
+num_steps: 1000
+batch_size: 128
+ent_coef: 0.02
+gamma: 0.9693339928617053
+clip_range: 0.2151957180412349
+adaptive_lr: True
+lr: 3e-4
+total_timesteps: 20000000
+log_dir: "./tensorboard_logs_refactored/"
+use_privileged_obs: False
+extra_obs: True
+device: "cpu"
+max_grad_norm: 0.5

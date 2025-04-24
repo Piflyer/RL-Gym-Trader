@@ -12,15 +12,7 @@ from time import time
 import requests_cache
 import datetime
 
-cache_name = 'yfinance_cache'
-expire_after = datetime.timedelta(days=1) # Cache expires after 1 day
-
-# Create a cached session
-session = requests_cache.CachedSession(
-    cache_name=cache_name,
-    backend='sqlite',
-    expire_after=expire_after
-)
+from tqdm import tqdm
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -56,17 +48,28 @@ class TradingEnv(gym.Env):
                 granularity='1d',
                 period='max',
                 randomize_episode=True,
-                use_privileged_obs=True,
+                use_privileged_obs=False,
                 seed=0,
                 max_episode_length=1000,
                 device="cpu",
                 rl_platform="SB3",
                 debug=False,
                 extra_obs=True,
+                dataloader=None,
                 verbose=False):
         super().__init__()
         
         # ---- Initialize parameters ---- 
+        
+        self.cache_name = 'yfinance_cache'
+        self.expire_after = datetime.timedelta(days=1) # Cache expires after 1 day
+
+        # Create a cached session
+        self.session = requests_cache.CachedSession(
+            cache_name=self.cache_name,
+            backend='sqlite',
+            expire_after=self.expire_after
+        )
         self.current_stock = "" # Current stock being traded
         self.initial_buy_date = "" # Initial buy date
         self.stock = stock
@@ -90,6 +93,7 @@ class TradingEnv(gym.Env):
         self.vix_data = None
         self.gspc_data = 0
         self.merged_data = None
+        self.all_stock_data = dataloader
         
         # --- Randomization Options ---
         self.random_symbols = [
@@ -98,16 +102,21 @@ class TradingEnv(gym.Env):
         ]
         
         # TODO: refactor fetch data to do front load and be more efficient with caching
-        vix_ticker = yf.Ticker("^VIX", session=session)
-        self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
-        if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
-
-        gspc_ticker = yf.Ticker("^GSPC", session=session)
-        self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
-        if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
-        
         if self.randomize_episode:
-            self.all_stock_data = {symbol: self._batch_fetch_data(symbol, self.period) for symbol in self.random_symbols}
+            if self.all_stock_data is None:
+                print("[INFO] Randomizing episode data for each env...")
+                print("Getting VIX Data")
+                vix_ticker = yf.Ticker("^VIX", session=self.session)
+                self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
+                if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
+
+                print("Getting GSPC Data")
+                gspc_ticker = yf.Ticker("^GSPC", session=self.session)
+                self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
+                if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
+                self.all_stock_data = {}
+                for symbol in tqdm(self.random_symbols, desc="Fetching stock data"):
+                    self.all_stock_data[symbol] = self.batch_fetch_data(symbol, self.period)
         
         # --- Action Space ---
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
@@ -116,6 +125,8 @@ class TradingEnv(gym.Env):
         obs_shape_base = 48 # Base observation shape
         if not self.extra_obs:
             obs_shape_base -= 14 # Remove extra observations
+        if self.use_privileged_obs:
+            obs_shape_base += 15
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_shape_base, 1), dtype=np.float32
         )
@@ -158,14 +169,16 @@ class TradingEnv(gym.Env):
         self.cum_gain = 0.0 # Cumulative gain since the start of the episode
         # ---- Fetch Data ----
         self._init_data()
-        obs, priv = self.get_observations()
         extras = {}
         extras["observations"] = {}
-        extras["observations"]["actor"] = obs
         # ---- Set initial state values AFTER data is loaded and index is set ----
         self.inital_bought_price = self.merged_data['Close'].iloc[self.ticker_index]
         self.bought_price = self.inital_bought_price # Set current bought price for the start
         self.current_close = self.inital_bought_price
+        
+        obs, priv = self.get_observations()
+        extras["observations"]["actor"] = obs
+        
         # ---- Continue setting up extras ----
         if self.use_privileged_obs:
             extras["observations"]["critic"] = priv["observations"]["critic"]
@@ -183,10 +196,10 @@ class TradingEnv(gym.Env):
         else:
             return obs, extras
     
-    def _batch_fetch_data(self, stock, period):
+    def batch_fetch_data(self, stock, period):
         # print(f"[INFO] Fetching data for {stock}...")
         try:
-            stock_ticker = yf.Ticker(stock, session=session)
+            stock_ticker = yf.Ticker(stock, session=self.session)
             stock_data = stock_ticker.history(period=period, auto_adjust=True)
             if self.extra_obs:
                 stock_df = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy() if not stock_data.empty else pd.DataFrame(index=stock_data.index)
@@ -219,7 +232,7 @@ class TradingEnv(gym.Env):
     
     def _fetch_data(self, stock, period):
         try:
-            stock_ticker = yf.Ticker(stock, session=session)
+            stock_ticker = yf.Ticker(stock, session=self.session)
             self.stock_data = stock_ticker.history(period=period, auto_adjust=True)
             if self.stock_data.empty: print(f"[WARNING] Failed to fetch data for primary stock {stock}.")
 
@@ -264,7 +277,6 @@ class TradingEnv(gym.Env):
         Randomizes the stock data and initial buy date for each episode.
         """
         self.current_stock = np.random.choice(self.random_symbols)
-        
         self.merged_data = self.all_stock_data[self.current_stock]
         if self.merged_data is None or self.merged_data.empty:
             print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
@@ -285,7 +297,7 @@ class TradingEnv(gym.Env):
         if self.randomize_episode:
             self._randomize_data()
         else:
-            self.merged_data = self._batch_fetch_data(self.stock, self.period)
+            self.merged_data = self.batch_fetch_data(self.stock, self.period)
             if self.merged_data is None or self.merged_data.empty:
                 print(f"[ERROR] Failed to fetch data for {self.stock}.")
                 # end the episode
@@ -426,18 +438,24 @@ class TradingEnv(gym.Env):
         
         base_obs = np.reshape(base_obs, (-1, 1))
         base_obs = np.nan_to_num(base_obs, nan=0.0, posinf=0.0, neginf=0.0) 
-        base_obs = torch.tensor(base_obs, dtype=torch.float32)
+        base_obs = torch.tensor(base_obs, dtype=torch.float32, device=self.device)
+
         extras = {}
         extras["observations"] = {}
         extras["observations"]["actor"] = base_obs
         if self.use_privileged_obs:
             privileged_obs = np.reshape(privileged_obs, (-1, 1))
-            privileged_obs = np.nan_to_num(privileged_obs, nan=0.0, posinf=0.0, neginf=0.0) 
-            privileged_obs = torch.tensor(privileged_obs, dtype=torch.float32)
+            privileged_obs = np.nan_to_num(privileged_obs, nan=0.0, posinf=0.0, neginf=0.0)
+            privileged_obs = torch.tensor(privileged_obs, dtype=torch.float32, device=self.device)
             extras['observations']['critic'] = privileged_obs
         else:
             extras['observations']['critic'] = base_obs
         
+        if self.use_privileged_obs and self.rl_platform == "SB3":
+            return privileged_obs, extras
+        #check if nan is in the base_obs
+        if torch.isnan(base_obs).any():
+            print(f"[ERROR] NaN detected in base_obs: {base_obs}")
         return base_obs, extras
         
     def step(self, action):
@@ -505,13 +523,14 @@ class TradingEnv(gym.Env):
             self.max_profit_since_buy = 0 # cleanup after buy/sell
         
         # Get the next observation
+        self.merged_data.fillna(0, inplace=True)
         observation, extras = self.get_observations()
         
         # Update the current timestep
         self.current_timestep += 1
         self.ticker_index += 1
         dones = [terminated, truncated]
-        dones = torch.tensor(dones, dtype=torch.bool)
+        dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
         extras["current_timestep"] = self.current_timestep
         extras["current_close"] = self.current_close
         extras["current_holding_value"] = self.current_holding_value
@@ -524,7 +543,7 @@ class TradingEnv(gym.Env):
         if self.rl_platform == "SB3":
             return observation.numpy(), reward, terminated, truncated, extras
         else:
-            reward = torch.tensor(reward, dtype=torch.float32)
+            reward = torch.tensor(reward, dtype=torch.float32, device=self.device)
             return observation, reward, dones, extras
     
     def _reward(self, action):
