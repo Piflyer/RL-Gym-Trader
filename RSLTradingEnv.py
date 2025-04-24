@@ -22,6 +22,9 @@ session = requests_cache.CachedSession(
     expire_after=expire_after
 )
 
+import warnings
+warnings.filterwarnings('ignore')
+
 # Suppress specific pandas warnings if necessary (optional)
 # warnings.filterwarnings("ignore", category=FutureWarning, module="pandas.core.indexing")
 # Ignore SettingWithCopyWarning if it becomes noisy during development
@@ -93,6 +96,10 @@ class TradingEnv(gym.Env):
             "NFLX", "VOO", "FTEC", "TSLA", "JPM", "V", "UNH"
         ]
         
+        # TODO: refactor fetch data to do front load and be more efficient with caching
+        # if self.randomize_episode:
+        #     self.all_stock_data = {symbol: self._fetch_data(symbol) for symbol in self.random_symbols}
+        
         # --- Action Space ---
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
         
@@ -138,6 +145,7 @@ class TradingEnv(gym.Env):
         self.current_close = 0.0 # Current close price of the stock
         self.sold_price = 0.0 # Price at which the stock was sold
         self.inital_bought_price = 0.0 # Price at which the stock was bought
+        self.bought_price = 0.0 # Price at which the stock was bought
         self.cum_gain = 0.0 # Cumulative gain since the start of the episode
         # ---- Fetch Data ----
         self._init_data()
@@ -145,6 +153,11 @@ class TradingEnv(gym.Env):
         extras = {}
         extras["observations"] = {}
         extras["observations"]["actor"] = obs
+        # ---- Set initial state values AFTER data is loaded and index is set ----
+        self.inital_bought_price = self.merged_data['Close'].iloc[self.ticker_index]
+        self.bought_price = self.inital_bought_price # Set current bought price for the start
+        self.current_close = self.inital_bought_price
+        # ---- Continue setting up extras ----
         if self.use_privileged_obs:
             extras["observations"]["critic"] = priv["observations"]["critic"]
         extras["current_timestep"] = self.current_timestep
@@ -153,8 +166,6 @@ class TradingEnv(gym.Env):
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep   
         extras["has_position"] = self.has_position
-        self.inital_bought_price = self.merged_data['Close'].iloc[self.ticker_index]
-        self.current_close = self.merged_data['Close'].iloc[self.ticker_index]
         end = time()
         if self.debug:
             print(f"Reset Time: {end - start:.4f}s")
@@ -190,7 +201,17 @@ class TradingEnv(gym.Env):
                 self.merged_data = stock_df
 
             self.merged_data = self.merged_data.groupby(self.merged_data.index.date).first()
-            self.merged_data = self.merged_data.dropna()
+            # self.merged_data = self.merged_data.dropna()
+            
+            self.merged_data.index = pd.to_datetime(self.merged_data.index) # Ensure index is datetime
+
+            # --- More robust cleaning ---
+            # Forward fill small gaps first (optional but can help)
+            self.merged_data = self.merged_data.ffill(limit=3)
+            # Handle NaNs in critical columns
+            if 'Volume' in self.merged_data.columns:
+                self.merged_data['Volume'].fillna(0.0, inplace=True) # Fill NaN volume with 0
+            self.merged_data.dropna(subset=['Close'], inplace=True) # Drop rows ONLY if 'Close' is missing
 
             min_required_length = 35 + self.max_episode_length
             if len(self.merged_data) < min_required_length:
@@ -226,8 +247,24 @@ class TradingEnv(gym.Env):
             if not self._fetch_data(self.stock, self.period):
                 print(f"[ERROR] Failed to fetch data for {self.stock}.")
                 # end the episode
-                return
-            self.ticker_index = self.merged_data.index.get_loc(pd.to_datetime(self.initial_buy_date).date())
+                # return
+                raise RuntimeError(f"Failed to fetch data for {self.stock} during init.")
+            # self.ticker_index = self.merged_data.index.get_loc(pd.to_datetime(self.initial_buy_date).date())
+            try:
+                requested_date = pd.to_datetime(self.initial_buy_date).normalize().date()
+                # Find the first valid trading day index >= requested_date with enough history (30 days)
+                min_required_index_loc = 30
+                valid_indices = np.where(self.merged_data.index.date >= requested_date)[0]
+                suitable_indices = valid_indices[valid_indices >= min_required_index_loc]
+
+                if len(suitable_indices) > 0:
+                    self.ticker_index = suitable_indices[0]
+                    self.initial_buy_date = self.merged_data.index[self.ticker_index].date() # Update to actual date used
+                    if self.debug: print(f"[DEBUG] Using start date {self.initial_buy_date} for fixed episode.")
+                else:
+                    raise ValueError(f"No suitable start date found >= {requested_date} with {min_required_index_loc} days history.")
+            except Exception as e:
+                raise ValueError(f"Error setting initial buy date for '{self.initial_buy_date}': {e}")
             self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
             self.current_networth = self.initial_networth
             self.current_holding_value = self.initial_networth
@@ -306,11 +343,14 @@ class TradingEnv(gym.Env):
             vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
             gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
         current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price
-        current_relative_gain = np.nan_to_num(current_relative_gain, nan=0.0, posinf=0.0, neginf=0.0)
+        if not pd.isna(self.bought_price) and abs(self.bought_price) > 1e-9:
+            current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price        
         if self.merged_data['Volume'].iloc[self.ticker_index - 1] == 0:
-            volume_change = 0
-        else:
-            volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - self.merged_data['Volume'].iloc[self.ticker_index - 1]) / self.merged_data['Volume'].iloc[self.ticker_index - 1]
+            volume_change = 0.0
+        prev_volume = self.merged_data['Volume'].iloc[self.ticker_index - 1]
+        if not pd.isna(prev_volume) and abs(prev_volume) > 1e-9:
+            volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - prev_volume) / prev_volume
+        volume_change = np.nan_to_num(volume_change, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Privileged observation
         if self.extra_obs:
@@ -455,18 +495,21 @@ class TradingEnv(gym.Env):
         # if doesnt't have position, try to maximize loss 
         self.greedy_reward = 0
         if self.max_profit_since_buy != 0 and self.has_position:
-            self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy)/ self.max_profit_since_buy
+            denominator = abs(self.max_profit_since_buy) + 1e-9
+            self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy) / denominator
         if self.max_profit_since_buy != 0 and not self.has_position:
-            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy)/ self.max_profit_since_buy
+            denominator = abs(self.max_profit_since_buy) + 1e-9
+            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / denominator
         if self.max_profit_since_buy == 0:
-            self.greedy_reward = 0.3
+            self.greedy_reward = 0.0
         
         
         
         # Calculate the the current networth gain to if just held the stock
         self.holding = (self.current_close - self.inital_bought_price) * self.initial_shares
         if self.has_position and self.holding != 0:   
-            self.holding_reward = (self.cum_gain - self.holding) / abs(self.holding)
+            if self.min_hold_days > 0:
+                self.holding_reward = (self.cum_gain - self.holding) / abs(self.holding)
         else:
             self.holding_reward = 0.1
         
