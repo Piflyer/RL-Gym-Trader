@@ -587,23 +587,4 @@ class TradingEnv(gym.Env):
         #clip the reward
         reward = np.clip(reward, -10, 7)
         
-        return reward  
-        
-        
-        
-        
-
-    
-    
-            
-        
-            
-            
-        
-        
-        
-        
-        
-        
-        
-        
+        return reward

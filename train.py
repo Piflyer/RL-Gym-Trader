@@ -1,19 +1,64 @@
-import gymnasium as gym
-import numpy as np
 from RSLTradingEnv import TradingEnv
-from stable_baselines3.common.env_checker import check_env
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.logger import HParam
-from stable_baselines3.common.vec_env import VecEnv, VecMonitor # Import VecMonitor
+from stable_baselines3.common.vec_env import VecMonitor # Import VecMonitor
 import yfinance as yf
 from tqdm import tqdm
 import yaml
 import requests_cache
 import datetime
 import pandas as pd
+from stable_baselines3.common.policies import ActorCriticPolicy
+import torch
+
+
+class PrivilegedPolicy(ActorCriticPolicy):
+    def __init__(self, *args, privileged_obs_dim=0, **kwargs):
+        self.privileged_obs_dim = privileged_obs_dim
+        super(PrivilegedPolicy, self).__init__(*args, **kwargs)
+    
+    def _build_mlp_extractor(self):
+        # Build the MLP extractor with the privileged observation dimension
+        self.actor_net = torch.nn.Sequential(
+            torch.nn.Linear(self.features_dim - self.privileged_obs_dim, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.ReLU(),
+        )
+        self.critic_net = torch.nn.Sequential(
+            torch.nn.Linear(self.features_dim, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.ReLU(),
+        )
+        
+        class PrivilegedExtractor(torch.nn.Module):
+            def __init__(self, actor_net, critic_net, privileged_obs_dim):
+                super().__init__()
+                self.actor_net = actor_net
+                self.critic_net = critic_net
+                self.privileged_obs_dim = privileged_obs_dim
+                self.latent_dim_pi = 128  # Final output size of actor_net
+                self.latent_dim_vf = 128  
+
+            def forward(self, features):
+                # SB3 requires this, but you don't have to use it directly
+                return self.forward_actor(features), self.forward_critic(features)
+
+            def forward_actor(self, features):
+                actor_input = features[:, :-self.privileged_obs_dim]
+                return self.actor_net(actor_input)
+
+            def forward_critic(self, features):
+                return self.critic_net(features)
+            
+        self.mlp_extractor = PrivilegedExtractor(self.actor_net, self.critic_net, self.privileged_obs_dim)
 
 cache_name = 'yfinance_cache'
 expire_after = datetime.timedelta(days=1) # Cache expires after 1 day
@@ -129,19 +174,35 @@ initial_lr = 3e-4
 new_logger = configure(log_dir, ["stdout", "tensorboard"])
 vec_env = make_vec_env(TradingEnv, n_envs=configPasrer.get("num_envs", 32), env_kwargs=env_kwargs)
 vec_env = VecMonitor(vec_env) # Wrap the VecEnv with VecMonitor
-model = PPO("MlpPolicy", 
-            vec_env, 
-            verbose=1, 
-            device=configPasrer.get("device", "cpu"),
-            n_steps=configPasrer.get("num_steps", 1000),
-            tensorboard_log=configPasrer.get("tensorboard_log", log_dir),
-            batch_size=configPasrer.get("batch_size", 128),
-            learning_rate=linear_schedule(float(configPasrer.get("lr", 3e-4))), 
-            ent_coef=configPasrer.get("ent_coef", 0.02), 
-            max_grad_norm=configPasrer.get("max_grad_norm", 0.5),
-            clip_range=configPasrer.get("clip_range", 0.2),
-            gamma=configPasrer.get("gamma", 0.99),
-            )
+if configPasrer.get("use_privileged_obs"):
+    model = PPO(PrivilegedPolicy, 
+                vec_env, 
+                verbose=1, 
+                device=configPasrer.get("device", "cpu"),
+                n_steps=configPasrer.get("num_steps", 1000),
+                tensorboard_log=configPasrer.get("tensorboard_log", log_dir),
+                batch_size=configPasrer.get("batch_size", 128),
+                learning_rate=linear_schedule(float(configPasrer.get("lr", 3e-4))), 
+                ent_coef=configPasrer.get("ent_coef", 0.02), 
+                max_grad_norm=configPasrer.get("max_grad_norm", 0.5),
+                clip_range=configPasrer.get("clip_range", 0.2),
+                gamma=configPasrer.get("gamma", 0.99),
+                policy_kwargs=dict(privileged_obs_dim=configPasrer.get("num_priv_obs")),
+                )
+else:
+    model = PPO("MlpPolicy", 
+                vec_env, 
+                verbose=1, 
+                device=configPasrer.get("device", "cpu"),
+                n_steps=configPasrer.get("num_steps", 1000),
+                tensorboard_log=configPasrer.get("tensorboard_log", log_dir),
+                batch_size=configPasrer.get("batch_size", 128),
+                learning_rate=linear_schedule(float(configPasrer.get("lr", 3e-4))), 
+                ent_coef=configPasrer.get("ent_coef", 0.02), 
+                max_grad_norm=configPasrer.get("max_grad_norm", 0.5),
+                clip_range=configPasrer.get("clip_range", 0.2),
+                gamma=configPasrer.get("gamma", 0.99),
+                )
 # model.learn(total_timesteps=configPasrer.get("total_timesteps", 2_000_000), 
 #             progress_bar=True, 
 #             tb_log_name=configPasrer.get("name", "refactored_stock_ppo_model_2M"), 
