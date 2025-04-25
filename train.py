@@ -159,7 +159,9 @@ env_kwargs = {
     "period": configPasrer.get("period", "max"),
     "extra_obs": configPasrer.get("extra_obs", True),
     "use_privileged_obs": configPasrer.get("use_privileged_obs", False),
+    "min_percnt": configPasrer.get("min_percnt", 0.8),
 }
+
 
 
 log_dir = "./tensorboard_logs_refactored/"
@@ -210,3 +212,6 @@ else:
 model.learn(total_timesteps=2_000_000, progress_bar=True, tb_log_name="stock_ppo", log_interval=1)
 
 model.save(f"models/{configPasrer.get('name', 'refactored_stock_ppo_model_2M')}")
+
+#eval mode:
+# obs_actor_only = full_obs[:, :-priv_dim]

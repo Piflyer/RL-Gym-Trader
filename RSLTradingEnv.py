@@ -56,6 +56,7 @@ class TradingEnv(gym.Env):
                 debug=False,
                 extra_obs=True,
                 dataloader=None,
+                min_percnt=0.8,
                 verbose=False):
         super().__init__()
         
@@ -86,6 +87,7 @@ class TradingEnv(gym.Env):
         self.rl_platform = rl_platform
         self.debug = debug
         self.extra_obs = extra_obs
+        self.min_percnt = min_percnt
         
         
         # ---- Stock Data Placeholder ----
@@ -502,7 +504,7 @@ class TradingEnv(gym.Env):
                 self.sold_price = self.current_close
                 self.days_since_last_trade = 0
         
-        if self.current_networth < self.initial_networth * 0.9:
+        if self.current_networth < self.initial_networth * self.min_percnt:
             terminated = True
         
         # Check if the episode is done
@@ -557,10 +559,12 @@ class TradingEnv(gym.Env):
         self.greedy_reward = 0
         if self.max_profit_since_buy != 0 and self.has_position:
             denominator = abs(self.max_profit_since_buy) + 1e-9
-            self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy) / denominator
+            # self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy) / denominator
+            self.greedy_reward = (self.current_holding_value - self.max_profit_since_buy) / self.current_networth
         if self.max_profit_since_buy != 0 and not self.has_position:
             denominator = abs(self.max_profit_since_buy) + 1e-9
-            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / denominator
+            # self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / denominator
+            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / self.current_networth
         if self.max_profit_since_buy == 0:
             self.greedy_reward = 0.0
         
@@ -574,15 +578,21 @@ class TradingEnv(gym.Env):
         else:
             self.holding_reward = 0.1
         
+        #werighted greedy reward by percentage of the current portfolio
+        self.sign = 1
+        if self.greedy_reward < 0:
+            self.sign = -1
+        
         #penalty for selling too early:
         self.min_hold_penalty = 0
         if (self.days_since_last_trade < self.min_hold_days) and action == 1:
             self.min_hold_penalty = (self.days_since_last_trade - self.min_hold_days) / self.min_hold_days
         
         # consturct the reward
+        self.weighted_greedy = self.sign * ((abs(self.greedy_reward) + 1)**2 -1)
         
         
-        reward = 2.0* self.greedy_reward + 3.0*self.holding_reward + 2.0 * self.min_hold_penalty
+        reward = self.weighted_greedy + 3.0*self.holding_reward + 2.0 * self.min_hold_penalty
         
         #clip the reward
         reward = np.clip(reward, -10, 7)
