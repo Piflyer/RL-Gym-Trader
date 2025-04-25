@@ -9,11 +9,54 @@ from tqdm import tqdm
 import yaml
 import requests_cache
 import datetime
+import numpy as np
 import pandas as pd
 from stable_baselines3.common.policies import ActorCriticPolicy
 import torch
 
+class CustomCallback(BaseCallback):
+    """
+    Callback for logging average extras['net_gain'],
+    extras['holding_gains'], and extras['current_networth']
+    to TensorBoard at the end of each rollout.
+    """
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        # buffers to accumulate values during rollout
+        self.net_gain_buffer = []
+        self.holding_gains_buffer = []
+        self.current_networth_buffer = []
 
+    def _on_step(self) -> bool:
+        # infos is a list of info-dicts, one per parallel env
+        infos = self.locals.get("infos", None)
+        if infos is not None:
+            for info in infos:
+                if "net_gain" in info:
+                    self.net_gain_buffer.append(info["net_gain"])
+                if "holding_gains" in info:
+                    self.holding_gains_buffer.append(info["holding_gains"])
+                if "current_networth" in info:
+                    self.current_networth_buffer.append(info["current_networth"])
+        return True
+
+    def _on_rollout_end(self) -> None:
+        # compute averages if we have any data
+        if len(self.net_gain_buffer) > 0:
+            avg_net = np.mean(self.net_gain_buffer)
+            avg_hold = np.mean(self.holding_gains_buffer)
+            avg_nw  = np.mean(self.current_networth_buffer)
+
+            # record to TB under "train/..."
+            self.logger.record("train/avg_net_gain",        avg_net)
+            self.logger.record("train/avg_holding_gains",   avg_hold)
+            self.logger.record("train/avg_current_networth", avg_nw)
+
+        # clear for next rollout
+        self.net_gain_buffer.clear()
+        self.holding_gains_buffer.clear()
+        self.current_networth_buffer.clear()
+        
 class PrivilegedPolicy(ActorCriticPolicy):
     def __init__(self, *args, privileged_obs_dim=0, **kwargs):
         self.privileged_obs_dim = privileged_obs_dim
@@ -205,11 +248,13 @@ else:
                 clip_range=configPasrer.get("clip_range", 0.2),
                 gamma=configPasrer.get("gamma", 0.99),
                 )
-# model.learn(total_timesteps=configPasrer.get("total_timesteps", 2_000_000), 
-#             progress_bar=True, 
-#             tb_log_name=configPasrer.get("name", "refactored_stock_ppo_model_2M"), 
-#             log_interval=1)
-model.learn(total_timesteps=2_000_000, progress_bar=True, tb_log_name="stock_ppo", log_interval=1)
+model.learn(total_timesteps=configPasrer.get("total_timesteps", 2_000_000), 
+            progress_bar=True, 
+            tb_log_name=configPasrer.get("name", "refactored_stock_ppo_model_2M"), 
+            log_interval=1,
+            callback=CustomCallback()
+            )
+# model.learn(total_timesteps=2_000_000, progress_bar=True, tb_log_name="stock_ppo", log_interval=1)
 
 model.save(f"models/{configPasrer.get('name', 'refactored_stock_ppo_model_2M')}")
 

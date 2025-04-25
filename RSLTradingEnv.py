@@ -119,6 +119,15 @@ class TradingEnv(gym.Env):
                 self.all_stock_data = {}
                 for symbol in tqdm(self.random_symbols, desc="Fetching stock data"):
                     self.all_stock_data[symbol] = self.batch_fetch_data(symbol, self.period)
+        if not self.randomize_episode:
+            print("Getting VIX Data")
+            vix_ticker = yf.Ticker("^VIX", session=self.session)
+            self.vix_data = vix_ticker.history(period=period, auto_adjust=True)
+            if self.vix_data.empty: print(f"[WARNING] Failed to fetch data for ^VIX.")
+            print("Getting GSPC Data")
+            gspc_ticker = yf.Ticker("^GSPC", session=self.session)
+            self.gspc_data = gspc_ticker.history(period=period,  auto_adjust=True)
+            if self.gspc_data.empty: print(f"[WARNING] Failed to fetch data for ^GSPC.")
         
         # --- Action Space ---
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
@@ -169,6 +178,8 @@ class TradingEnv(gym.Env):
         self.inital_bought_price = 0.0 # Price at which the stock was bought
         self.bought_price = 0.0 # Price at which the stock was bought
         self.cum_gain = 0.0 # Cumulative gain since the start of the episode
+        self.holding_cum_gain = 0.0 # Cumulative gain since the start of the episode
+        self.prev_close = 0.0 # Previous close price of the stock
         # ---- Fetch Data ----
         self._init_data()
         extras = {}
@@ -190,6 +201,8 @@ class TradingEnv(gym.Env):
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep   
         extras["has_position"] = self.has_position
+        extras["holding_gains"] = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain) if self.holding_cum_gain != 0 else 0
+        extras["net_gain"] = (self.current_networth - self.initial_networth) / abs(self.initial_networth) if self.initial_networth != 0 else 0
         end = time()
         if self.debug:
             print(f"Reset Time: {end - start:.4f}s")
@@ -512,17 +525,24 @@ class TradingEnv(gym.Env):
             truncated = True
         
         # Calculate the reward
+        self.prev_close = self.merged_data['Close'].iloc[self.ticker_index - 1]
+        self.holding_cum_gain  += (self.current_close - self.prev_close) * self.initial_shares
+        if self.has_position:
+            self.cum_gain += (self.current_close - self.prev_close) * self.initial_shares
+        reward = self._reward(action)
+        #order MATTERS for cum_gain and max_profit_since_buy
         if self.has_position:
             self.max_profit_since_buy = max(self.max_profit_since_buy, self.current_holding_value)
-            prev_close = self.merged_data['Close'].iloc[self.ticker_index - 1]
-            self.cum_gain += (self.current_close - prev_close) * self.initial_shares
         else:
-            self.max_profit_since_buy = max(self.max_profit_since_buy, -self.current_holding_value)
-        reward = self._reward(action)
+            self.max_profit_since_buy = min(self.max_profit_since_buy, -self.current_holding_value)
         if action == 1:
             self.has_position = not self.has_position
+            if self.has_position: # if we just bought
+                self.max_profit_since_buy = 0 
+            else: # if we just sold
+                self.max_profit_since_buy = self.current_holding_value
             self.current_holding_value = 0 # cleanup after buy/sell
-            self.max_profit_since_buy = 0 # cleanup after buy/sell
+
         
         # Get the next observation
         self.merged_data.fillna(0, inplace=True)
@@ -539,6 +559,8 @@ class TradingEnv(gym.Env):
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep
         extras["has_position"] = self.has_position
+        extras["holding_gains"] = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain) if self.holding_cum_gain != 0 else 0
+        extras["net_gain"] = (self.current_networth - self.initial_networth) / abs(self.initial_networth) if self.initial_networth != 0 else 0
         end = time()
         if self.debug:
             print(f"Step Time: {end - start:.4f}s")
@@ -564,17 +586,16 @@ class TradingEnv(gym.Env):
         if self.max_profit_since_buy != 0 and not self.has_position:
             denominator = abs(self.max_profit_since_buy) + 1e-9
             # self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / denominator
-            self.greedy_reward = (-self.current_holding_value + self.max_profit_since_buy) / self.current_networth
+            self.greedy_reward = (self.max_profit_since_buy - self.current_holding_value) / self.current_networth
         if self.max_profit_since_buy == 0:
             self.greedy_reward = 0.0
         
         
         
         # Calculate the the current networth gain to if just held the stock
-        self.holding = (self.current_close - self.inital_bought_price) * self.initial_shares
-        if self.has_position and self.holding != 0:   
+        if self.holding_cum_gain != 0:   
             if self.min_hold_days > 0:
-                self.holding_reward = (self.cum_gain - self.holding) / abs(self.holding)
+                self.holding_reward = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain)
         else:
             self.holding_reward = 0.1
         
@@ -590,11 +611,30 @@ class TradingEnv(gym.Env):
         
         # consturct the reward
         self.weighted_greedy = self.sign * ((abs(self.greedy_reward) + 1)**2 -1)
+        self.clipped_weighted_greedy = np.clip(self.weighted_greedy, -1, 1)
+        self.clipped_holding_reward = np.clip(self.holding_reward, -1, 1)
         
-        
-        reward = self.weighted_greedy + 3.0*self.holding_reward + 2.0 * self.min_hold_penalty
+        reward = self.clipped_weighted_greedy + self.clipped_holding_reward + self.min_hold_penalty
         
         #clip the reward
-        reward = np.clip(reward, -10, 7)
+        reward = np.clip(reward, -3, 3)
         
         return reward
+
+if __name__ == "__main__":
+    env = TradingEnv(randomize_episode=False, initial_buy_date="2020-12-03", stock="UAL", extra_obs=True)
+    obs, extras = env.reset()
+    cum_reward = 0
+    for j in range(100):
+        action = env.action_space.sample()
+        obs, reward, truncated, terminated, info = env.step(action)
+        print(" ")
+        print(f"Current Holding Value: {env.current_holding_value}, Current Networth: {env.current_networth}")
+        print(f"Greedy Reward: {env.greedy_reward}, Holding Reward: {env.holding_reward}")
+        print(f"Weighted Greedy Reward: {env.weighted_greedy}, Min Hold Penalty: {env.min_hold_penalty}")
+        print(f"Cumulative Gain: {env.cum_gain}, Holding Cumulative Gain: {env.holding_cum_gain}")
+        print(f"Reward: {reward}, Action: {action}, Postion: {env.has_position}")
+        print(" ")
+        cum_reward += reward
+    
+    print(f"Cumulative Reward: {cum_reward}")

@@ -1,7 +1,7 @@
 name: "TradingEnv_Privileged"
 rl_platform: "SB3"
 period: "max"
-num_envs: 32
+num_envs: 48
 num_steps: 1000
 num_priv_obs: 15
 batch_size: 128
