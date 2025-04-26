@@ -3,8 +3,9 @@ rl_platform: "SB3"
 period: "max"
 num_envs: 48
 num_steps: 1000
-num_priv_obs: 15
+num_priv_obs: 18
 batch_size: 128
+eval_steps: 1000
 ent_coef: 0.02
 gamma: 0.9693339928617053
 clip_range: 0.2151957180412349
@@ -17,3 +18,4 @@ extra_obs: True
 min_percnt: 0.8
 device: "cpu"
 max_grad_norm: 0.5
+eval_freq: 100000

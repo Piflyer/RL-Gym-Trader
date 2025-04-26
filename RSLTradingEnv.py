@@ -56,7 +56,10 @@ class TradingEnv(gym.Env):
                 debug=False,
                 extra_obs=True,
                 dataloader=None,
+                eval_buffer = 0,
                 min_percnt=0.8,
+                eval = False,
+                num_priv_obs=5,
                 verbose=False):
         super().__init__()
         
@@ -86,8 +89,11 @@ class TradingEnv(gym.Env):
         self.max_episode_length = max_episode_length
         self.rl_platform = rl_platform
         self.debug = debug
+        self.eval_buffer = eval_buffer
+        self.eval = eval
         self.extra_obs = extra_obs
         self.min_percnt = min_percnt
+        self.num_priv_obs = num_priv_obs
         
         
         # ---- Stock Data Placeholder ----
@@ -133,11 +139,11 @@ class TradingEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(2) # 0: Hold, 1: Buy/Sell
         
         # --- Observation Space ---
-        obs_shape_base = 48 # Base observation shape
+        obs_shape_base = 50 # Base observation shape
         if not self.extra_obs:
             obs_shape_base -= 14 # Remove extra observations
         if self.use_privileged_obs:
-            obs_shape_base += 15
+            obs_shape_base += self.num_priv_obs
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_shape_base, 1), dtype=np.float32
         )
@@ -300,7 +306,9 @@ class TradingEnv(gym.Env):
         # if not self._fetch_data(self.current_stock, 'max'):
         #     print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
         #     self.reset()
-        self.ticker_index = np.random.randint(30, len(self.merged_data) - self.max_episode_length - 5)
+        self.ticker_index = np.random.randint(30, len(self.merged_data) - (self.eval_buffer + self.max_episode_length + 5))
+        if self.eval:
+            self.ticker_index = len(self.merged_data) - (self.eval_buffer + 5)
         self.initial_buy_date = self.merged_data.index[self.ticker_index]
         self.initial_shares = np.random.randint(1, 11)
         self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
@@ -359,6 +367,14 @@ class TradingEnv(gym.Env):
             raise ValueError(f"Invalid stock name: {stock}. Must be 'stock', 'vix', or 'gspc'.")
     
     def _calculate_momentum(self, price_array):
+        if len(price_array) == 5:
+            denom_5 = price_array[-5]
+            if not pd.isna(denom_5) and abs(denom_5) > 1e-9: # Check for NaN and near-zero
+                momentum_5 = (price_array[-1] - denom_5) / denom_5
+            else:
+                momentum_5 = 0.0
+            return momentum_5 # for privileged observation ONLY
+        
         if len(price_array) < 30:
             # Return 0.0 or handle as appropriate if not enough data
             return 0.0, 0.0 # Or raise an error earlier
@@ -393,14 +409,19 @@ class TradingEnv(gym.Env):
         - Past 7 day momentum of the S&P500 (1)
         - Current relative gain (percentage) (1)
         - Percentage change of volume (1)
-        Total: 47 features
+        - Gains over holding (1)
+        - Current position (1)
+        Total: 50 features
         
         Privileged observation (if use_privileged_obs is True):
         - Next 5 closing prices of the stock (5)
         - Next 5 closing prices of the VIX (5)
         - Next 5 closing prices of the S&P 500 (5)
+        - Momentum of the stock (1)
+        - Momentum of the VIX (1)
+        - Momentum of the S&P500 (1)
         
-        Total: 47 + 15 = 62 features
+        Total: 50 + 18 = 68 features
         returns: torch.Tensor, dict()
         """
         
@@ -411,15 +432,32 @@ class TradingEnv(gym.Env):
             gspc_5 = self._fetch_closing("gspc", 5)
             vix_7_momentum, vix_30_momentum = self._calculate_momentum(self._fetch_closing("vix", 30))
             gspc_7_momentum, gspc_30_momentum = self._calculate_momentum(self._fetch_closing("gspc", 30))
-        current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price
+        current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / abs(self.bought_price)
         if not pd.isna(self.bought_price) and abs(self.bought_price) > 1e-9:
-            current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / self.bought_price        
-        if self.merged_data['Volume'].iloc[self.ticker_index - 1] == 0:
+            current_relative_gain = (self.merged_data['Close'].iloc[self.ticker_index] - self.bought_price) / abs(self.bought_price) 
+        if not self.has_position:
+            current_relative_gain *= -1
+        
+        if self.ticker_index - 1 < 0:
             volume_change = 0.0
-        prev_volume = self.merged_data['Volume'].iloc[self.ticker_index - 1]
+        else:
+            prev_volume = self.merged_data['Volume'].iloc[self.ticker_index - 1]
+        if prev_volume == 0:
+            volume_change = 0.0
         if not pd.isna(prev_volume) and abs(prev_volume) > 1e-9:
             volume_change = (self.merged_data['Volume'].iloc[self.ticker_index] - prev_volume) / prev_volume
         volume_change = np.nan_to_num(volume_change, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        #more observations for robustness?
+        
+        gains_over_holding = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain) if self.holding_cum_gain != 0 else 0
+        position = 1 if self.has_position else 0
+        # Normalize the stock_30 prices
+        stock_30 = (stock_30 - np.mean(stock_30)) / np.std(stock_30)
+        # Normalize the vix_5 prices
+        vix_5 = (vix_5 - np.mean(vix_5)) / np.std(vix_5)
+        # Normalize the gspc_5 prices
+        gspc_5 = (gspc_5 - np.mean(gspc_5)) / np.std(gspc_5)
         
         # Privileged observation
         if self.extra_obs:
@@ -431,7 +469,9 @@ class TradingEnv(gym.Env):
                 [vix_7_momentum, vix_30_momentum],
                 [gspc_7_momentum, gspc_30_momentum],
                 [current_relative_gain],
-                [volume_change]
+                [volume_change],
+                [gains_over_holding],
+                [position]
             ])
         else:
             base_obs = np.concatenate([
@@ -446,7 +486,13 @@ class TradingEnv(gym.Env):
             if self.extra_obs:
                 priv_vix = self._fetch_closing("vix", 5)
                 priv_gspc = self._fetch_closing("gspc", 5)
-                privileged_obs = np.concatenate([base_obs, priv_stock, priv_vix, priv_gspc])
+                priv_vix_5_momentum = self._calculate_momentum(priv_vix)
+                priv_gspc_5_momentum = self._calculate_momentum(priv_gspc)
+                priv_stock_5_momentum = self._calculate_momentum(priv_stock)
+                priv_vix = (priv_vix - np.mean(vix_5)) / np.std(vix_5)
+                priv_gspc = (priv_gspc - np.mean(gspc_5)) / np.std(gspc_5)
+                priv_stock = (priv_stock - np.mean(stock_30)) / np.std(stock_30)
+                privileged_obs = np.concatenate([base_obs, priv_stock, priv_vix, priv_gspc, [priv_stock_5_momentum], [priv_vix_5_momentum], [priv_gspc_5_momentum]])
             else:
                 privileged_obs = np.concatenate([base_obs, priv_stock])
             privileged_obs = np.reshape(privileged_obs, (-1, 1))
