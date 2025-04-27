@@ -60,6 +60,7 @@ class TradingEnv(gym.Env):
                 min_percnt=0.8,
                 eval = False,
                 num_priv_obs=5,
+                curriculum_manager=None,
                 verbose=False):
         super().__init__()
         
@@ -94,6 +95,7 @@ class TradingEnv(gym.Env):
         self.extra_obs = extra_obs
         self.min_percnt = min_percnt
         self.num_priv_obs = num_priv_obs
+        self.curriculum_manager = curriculum_manager
         
         
         # ---- Stock Data Placeholder ----
@@ -186,6 +188,7 @@ class TradingEnv(gym.Env):
         self.cum_gain = 0.0 # Cumulative gain since the start of the episode
         self.holding_cum_gain = 0.0 # Cumulative gain since the start of the episode
         self.prev_close = 0.0 # Previous close price of the stock
+        self.failed_buy = 0 # whether the buy failed
         # ---- Fetch Data ----
         self._init_data()
         extras = {}
@@ -207,6 +210,7 @@ class TradingEnv(gym.Env):
         extras["current_networth"] = self.current_networth
         extras["current_step"] = self.current_timestep   
         extras["has_position"] = self.has_position
+        extras["reward"] = 0.0
         extras["holding_gains"] = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain) if self.holding_cum_gain != 0 else 0
         extras["net_gain"] = (self.current_networth - self.initial_networth) / abs(self.initial_networth) if self.initial_networth != 0 else 0
         end = time()
@@ -532,6 +536,8 @@ class TradingEnv(gym.Env):
             done (bool): Whether the episode is done.
             info (dict): Additional information about the step.
         """
+        self.failed_buy = 0
+        
         if type(action) == torch.Tensor:
             action = action.item()
         self.current_close = self.merged_data['Close'].iloc[self.ticker_index]
@@ -558,10 +564,16 @@ class TradingEnv(gym.Env):
             else:
                 self.bought_price = self.current_close
                 if self.current_networth < self.current_close * self.initial_shares:
-                    terminated = True
-                # self.current_holding_value = 0
-                self.sold_price = self.current_close
-                self.days_since_last_trade = 0
+                    # terminated = True
+                    #means that trade doesn't go through [OVERRIDE]
+                    self.sold_price = 0
+                    self.failed_buy = 1
+                    self.days_since_last_trade += 1
+                    action = 0
+                else:
+                    # self.current_holding_value = 0
+                    self.sold_price = self.current_close
+                    self.days_since_last_trade = 0
         
         if self.current_networth < self.initial_networth * self.min_percnt:
             terminated = True
@@ -607,6 +619,7 @@ class TradingEnv(gym.Env):
         extras["has_position"] = self.has_position
         extras["holding_gains"] = (self.cum_gain - self.holding_cum_gain) / abs(self.holding_cum_gain) if self.holding_cum_gain != 0 else 0
         extras["net_gain"] = (self.current_networth - self.initial_networth) / abs(self.initial_networth) if self.initial_networth != 0 else 0
+        extras["reward"] = reward
         end = time()
         if self.debug:
             print(f"Step Time: {end - start:.4f}s")
@@ -660,7 +673,14 @@ class TradingEnv(gym.Env):
         self.clipped_weighted_greedy = np.clip(self.weighted_greedy, -1, 1)
         self.clipped_holding_reward = np.clip(self.holding_reward, -1, 1)
         
-        reward = self.clipped_weighted_greedy + self.clipped_holding_reward + self.min_hold_penalty
+        curriculum_weight = self.curriculum_manager.get_curriculum("greedy_reward") 
+        if curriculum_weight is not None:
+            weight = curriculum_weight / self.curriculum_manager.get_max_steps()
+            self.clipped_weighted_greedy = self.clipped_weighted_greedy * weight
+        
+        self.failed_buy_reward = self.failed_buy * -2
+        
+        reward = self.clipped_weighted_greedy + self.clipped_holding_reward + self.min_hold_penalty +  self.failed_buy_reward
         
         #clip the reward
         reward = np.clip(reward, -3, 3)

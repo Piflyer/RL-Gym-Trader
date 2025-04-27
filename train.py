@@ -15,29 +15,34 @@ import pandas as pd
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.callbacks import EvalCallback, CallbackList, BaseCallback
 import torch
+from collections import deque
 
 class CurriculumStepper:
-    def __init__(self, step_size=1, max_steps=10, curriculum_name="greedy_rewards"):
+    def __init__(self, step_size=1, max_steps=10, curriculum_name=["curriculum"]):
         self.step_size = step_size
         self.max_steps = max_steps
         self.curriculum_name = curriculum_name
-        self.current_step = 0
+        self.curriculums = {symbol: 0 for symbol in self.curriculum_name}
     
-    def step(self):
-        if self.current_step < self.max_steps:
-            self.current_step += self.step_size
+    def step(self, symbol):
+        if symbol not in self.curriculum_name:
+            raise ValueError(f"Symbol {symbol} not in curriculum.")
+        # Check if the current step is less than the max steps
+        # and increment the step size
+        if self.curriculums[symbol] < self.max_steps:
+            self.curriculums[symbol] += self.step_size
             return True
         else:
             return False
     def reset(self):
-        self.current_step = 0
+        self.curriculums = {symbol: 0 for symbol in self.curriculum_name}
         return True
-    def get_curriculum(self):
-        return self.curriculum_name
-    def get_step(self):
-        return self.current_step
-    
-        
+    def get_curriculum(self, symbol):
+        if symbol not in self.curriculum_name:
+            return None
+        return self.curriculums[symbol]
+    def get_max_steps(self):
+        return self.max_steps
 
 class PadPrivilegedObs(ObservationWrapper):
     """
@@ -76,16 +81,22 @@ class CustomCallback(BaseCallback):
     extras['holding_gains'], and extras['current_networth']
     to TensorBoard at the end of each rollout.
     """
-    def __init__(self, verbose=0):
+    def __init__(self, verbose=0, curriculum_manager=None):
         super().__init__(verbose)
         # buffers to accumulate values during rollout
         self.net_gain_buffer = []
         self.holding_gains_buffer = []
         self.current_networth_buffer = []
+        self.curriculum_manager = curriculum_manager
+        self.curriculum_net_gains = deque(maxlen=100)
+        self.curriculum_holding_gains = deque(maxlen=100)
+        self.curriculum_rewards = deque(maxlen=100)
+        self.reward_buffer = []
 
     def _on_step(self) -> bool:
         # infos is a list of info-dicts, one per parallel env
         infos = self.locals.get("infos", None)
+        self.reward_buffer.append(np.mean(self.locals["rewards"]))
         if infos is not None:
             for info in infos:
                 if "net_gain" in info:
@@ -109,10 +120,34 @@ class CustomCallback(BaseCallback):
             self.logger.record("train/avg_current_networth", avg_nw)
 
         # clear for next rollout
+        self.curriculum_net_gains.append(np.mean(self.net_gain_buffer))
+        self.curriculum_holding_gains.append(np.mean(self.holding_gains_buffer))
+        self.curriculum_rewards.append(np.sum(self.locals["rewards"]))
         self.net_gain_buffer.clear()
+        self.reward_buffer.clear()
         self.holding_gains_buffer.clear()
         self.current_networth_buffer.clear()
-        
+        if self.curriculum_manager is not None:
+            self.logger.record("curriculum/current_greedy_reward_step", self.curriculum_manager.get_curriculum("greedy_reward"))
+            if len(self.curriculum_net_gains) > 0:
+                avg_net_gain = np.mean(self.curriculum_net_gains)
+                avg_holding_gain = np.mean(self.curriculum_holding_gains)
+                self.logger.record("curriculum/avg_net_gain", avg_net_gain)
+                self.logger.record("curriculum/avg_holding_gain", avg_holding_gain)
+                std_net_gain = np.std(self.curriculum_net_gains)
+                std_holding_gain = np.std(self.curriculum_holding_gains)
+                self.logger.record("curriculum/std_net_gain", std_net_gain)
+                self.logger.record("curriculum/std_holding_gain", std_holding_gain)
+                std_rewards = np.std(self.curriculum_rewards)
+                avg_rewards = np.mean(self.curriculum_rewards)
+                self.logger.record("curriculum/std_rewards", std_rewards)
+                # check standard deviation
+                if len(self.curriculum_net_gains) == 100:
+                    if (avg_net_gain > 0.13 and std_net_gain < 0.45) or (avg_rewards > 40 and std_rewards < 4):
+                        self.curriculum_manager.step("greedy_reward")
+                        print(f"[INFO] Curriculum step for greedy_reward: {self.curriculum_manager.get_curriculum('greedy_reward')}")
+                        self.curriculum_net_gains.clear()
+                        self.curriculum_holding_gains.clear()
 class PrivilegedPolicy(ActorCriticPolicy):
     def __init__(self, *args, privileged_obs_dim=0, **kwargs):
         self.privileged_obs_dim = privileged_obs_dim
@@ -214,6 +249,7 @@ class Dataloader:
     
     def dataloader(self): 
         all_stock_data = {}
+        print("[INFO] Fetching data...")
         for symbol in tqdm(self.symbols, desc="Fetching stock data"):
                 all_stock_data[symbol] = self.batch_fetch_data(symbol)
         return all_stock_data
@@ -278,6 +314,15 @@ def linear_schedule(initial_value):
         return initial_value * progress_remaining
     return func
 
+if configPasrer.get("curriculum") is not None:
+    curriculum_manager = CurriculumStepper(
+        step_size=configPasrer.get("curriculum_step_size", 1),
+        max_steps=configPasrer.get("curriculum_max_steps", 10),
+        curriculum_name=configPasrer.get("curriculum", ["curriculum"])
+    )
+else: 
+    curriculum_manager = None
+
 env_kwargs = {
     "dataloader": dataloader,
     "max_episode_length": configPasrer.get("num_steps", 1000),
@@ -291,6 +336,7 @@ env_kwargs = {
     "eval_buffer": configPasrer.get("eval_steps", 1000),
     "min_percnt": configPasrer.get("min_percnt", 0.8),
     "num_priv_obs": configPasrer.get("num_priv_obs", 0),
+    "curriculum_manager": curriculum_manager,
 }
 
 #setup for evaluation
@@ -320,11 +366,9 @@ eval_callback = EvalCallback(
 
 
 log_dir = "./tensorboard_logs_refactored/"
-
-callback = CallbackList([CustomCallback()])
-
 # callback = CustomCallback()
 
+callback = CallbackList([CustomCallback(curriculum_manager=curriculum_manager)])
 
 
 new_logger = configure(log_dir, ["stdout", "tensorboard"])
@@ -360,6 +404,7 @@ else:
                 max_grad_norm=configPasrer.get("max_grad_norm", 0.5),
                 clip_range=configPasrer.get("clip_range", 0.2),
                 gamma=configPasrer.get("gamma", 0.99),
+                curriculum_manager=curriculum_manager,
                 )
 model.learn(total_timesteps=configPasrer.get("total_timesteps", 2_000_000), 
             progress_bar=True, 
