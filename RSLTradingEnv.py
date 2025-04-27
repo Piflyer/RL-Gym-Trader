@@ -297,7 +297,7 @@ class TradingEnv(gym.Env):
         """
         Randomizes the stock data and initial buy date for each episode.
         """
-        self.current_stock = np.random.choice(self.random_symbols)
+        self.current_stock = np.random.choice(list(self.all_stock_data.keys()))
         self.merged_data = self.all_stock_data[self.current_stock]
         if self.merged_data is None or self.merged_data.empty:
             print(f"[ERROR] Failed to fetch data for {self.current_stock}.")

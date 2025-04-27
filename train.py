@@ -5,6 +5,8 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import VecMonitor # Import VecMonitor
 import yfinance as yf
 from tqdm import tqdm
+import gymnasium as gym
+from gymnasium import ObservationWrapper, spaces
 import yaml
 import requests_cache
 import datetime
@@ -13,6 +15,60 @@ import pandas as pd
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.callbacks import EvalCallback, CallbackList, BaseCallback
 import torch
+
+class CurriculumStepper:
+    def __init__(self, step_size=1, max_steps=10, curriculum_name="greedy_rewards"):
+        self.step_size = step_size
+        self.max_steps = max_steps
+        self.curriculum_name = curriculum_name
+        self.current_step = 0
+    
+    def step(self):
+        if self.current_step < self.max_steps:
+            self.current_step += self.step_size
+            return True
+        else:
+            return False
+    def reset(self):
+        self.current_step = 0
+        return True
+    def get_curriculum(self):
+        return self.curriculum_name
+    def get_step(self):
+        return self.current_step
+    
+        
+
+class PadPrivilegedObs(ObservationWrapper):
+    """
+    Wraps an env whose raw obs is shape (raw_dim, 1) and pads
+    `priv_dim` zeros to make it (raw_dim + priv_dim, 1).
+    Works with vectorized obs of shape (n_env, raw_dim, 1) too.
+    """
+    def __init__(self, env: gym.Env, priv_dim: int):
+        super().__init__(env)
+        old_low  = env.observation_space.low
+        old_high = env.observation_space.high
+        # assume old_low/high shape = (raw_dim, 1)
+        raw_dim, one = old_low.shape
+        new_shape = (raw_dim + priv_dim, one)
+        # pad low/high with zeros (or very large bounds if you prefer)
+        low  = np.vstack([old_low,  np.zeros((priv_dim, one), dtype=old_low.dtype)])
+        high = np.vstack([old_high, np.zeros((priv_dim, one), dtype=old_high.dtype)])
+        self.observation_space = spaces.Box(low=low, high=high, dtype=old_low.dtype)
+
+    def observation(self, obs: np.ndarray) -> np.ndarray:
+        # obs: either (raw_dim,1) or (n_env, raw_dim,1)
+        if obs.ndim == 3:
+            # vectorized
+            n, raw_dim, c = obs.shape
+            pad = np.zeros((n, self.observation_space.shape[0] - raw_dim, c), dtype=obs.dtype)
+            return np.concatenate([obs, pad], axis=1)
+        else:
+            # single env
+            raw_dim, c = obs.shape
+            pad = np.zeros((self.observation_space.shape[0] - raw_dim, c), dtype=obs.dtype)
+            return np.concatenate([obs, pad], axis=0)
 
 class CustomCallback(BaseCallback):
     """
@@ -114,7 +170,7 @@ session = requests_cache.CachedSession(
 )
 
 class Dataloader:
-    def __init__(self, period, session, extra_obs, max_episode_length=1000):
+    def __init__(self, period, session, extra_obs, max_episode_length=1000, extended=False):
         self.session = session
         self.period = period
         self.extra_obs = extra_obs
@@ -144,16 +200,21 @@ class Dataloader:
             # Information Technology
             "AAPL", "MSFT", "GOOGL", "NVDA", "ADBE",
             # Materials
-            "DOW", "DD", "LIN", "NEM",
+            "SHW", "DD", "LIN", "NEM",
             # Real Estate
             "AMT", "PLD", "SPG", "AVB",
             # Utilities
             "NEE", "DUK", "SO", "D"
         ]
+        
+        if extended:
+            self.symbols = self.random_symbols_extend
+        else:
+            self.symbols = self.random_symbols
     
     def dataloader(self): 
         all_stock_data = {}
-        for symbol in tqdm(self.random_symbols, desc="Fetching stock data"):
+        for symbol in tqdm(self.symbols, desc="Fetching stock data"):
                 all_stock_data[symbol] = self.batch_fetch_data(symbol)
         return all_stock_data
     
@@ -190,9 +251,6 @@ class Dataloader:
             print(f"[ERROR] Exception during data fetch/process for {stock}: {e}")
             return None
 
-dataloader = Dataloader(period="max", session=session, extra_obs=True)
-dataloader = dataloader.dataloader()
-
 class ConfigParser:
     def __init__(self, config_path):
         self.config_path = config_path
@@ -212,6 +270,8 @@ class ConfigParser:
             yaml.dump(self.config, file)
 
 configPasrer = ConfigParser('sb3_config.yaml')
+dataloader = Dataloader(period="max", session=session, extra_obs=True, extended=configPasrer.get("extended_data", False))
+dataloader = dataloader.dataloader()
 
 def linear_schedule(initial_value):
     def func(progress_remaining):
@@ -271,6 +331,7 @@ new_logger = configure(log_dir, ["stdout", "tensorboard"])
 vec_env = make_vec_env(TradingEnv, n_envs=configPasrer.get("num_envs", 32), env_kwargs=env_kwargs)
 vec_env = VecMonitor(vec_env) # Wrap the VecEnv with VecMonitor
 if configPasrer.get("use_privileged_obs"):
+    print("[INFO] Using privileged observations.")
     model = PPO(PrivilegedPolicy, 
                 vec_env, 
                 verbose=1, 
@@ -286,6 +347,7 @@ if configPasrer.get("use_privileged_obs"):
                 policy_kwargs=dict(privileged_obs_dim=configPasrer.get("num_priv_obs")),
                 )
 else:
+    print("Using standard policy without privileged observations.")
     model = PPO("MlpPolicy", 
                 vec_env, 
                 verbose=1, 

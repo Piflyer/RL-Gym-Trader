@@ -1,4 +1,4 @@
-name: "TradingEnv_Privileged"
+name: "TradingEnv_50tickers"
 rl_platform: "SB3"
 period: "max"
 num_envs: 48
@@ -13,9 +13,10 @@ adaptive_lr: True
 lr: 3e-4
 total_timesteps: 20000000
 log_dir: "./tensorboard_logs_refactored/"
-use_privileged_obs: True
+use_privileged_obs: False
 extra_obs: True
 min_percnt: 0.8
 device: "cpu"
 max_grad_norm: 0.5
 eval_freq: 100000
+extended_data: True
