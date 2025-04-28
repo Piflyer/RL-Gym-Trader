@@ -337,6 +337,7 @@ env_kwargs = {
     "min_percnt": configPasrer.get("min_percnt", 0.8),
     "num_priv_obs": configPasrer.get("num_priv_obs", 0),
     "curriculum_manager": curriculum_manager,
+    "failed_trade_terminate": configPasrer.get("failed_trade_terminate", True),
 }
 
 #setup for evaluation
@@ -350,6 +351,7 @@ eval_env_kwargs = {
     "use_privileged_obs": False,
     "min_percnt": configPasrer.get("min_percnt", 0.8),
     "eval": True,
+    "failed_trade_terminate": configPasrer.get("failed_trade_terminate", True),
 }
 # Create the evaluation environment
 eval_env = make_vec_env(TradingEnv, n_envs=1, env_kwargs=eval_env_kwargs)
@@ -404,7 +406,6 @@ else:
                 max_grad_norm=configPasrer.get("max_grad_norm", 0.5),
                 clip_range=configPasrer.get("clip_range", 0.2),
                 gamma=configPasrer.get("gamma", 0.99),
-                curriculum_manager=curriculum_manager,
                 )
 model.learn(total_timesteps=configPasrer.get("total_timesteps", 2_000_000), 
             progress_bar=True, 

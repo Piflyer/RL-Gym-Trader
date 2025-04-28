@@ -61,6 +61,7 @@ class TradingEnv(gym.Env):
                 eval = False,
                 num_priv_obs=5,
                 curriculum_manager=None,
+                failed_trade_terminate = False,
                 verbose=False):
         super().__init__()
         
@@ -84,9 +85,11 @@ class TradingEnv(gym.Env):
         self.granularity = granularity
         self.period = period
         self.device = device
+        self.seed = seed
         self.randomize_episode = randomize_episode
         self.use_privileged_obs = use_privileged_obs
         self.verbose = verbose
+        self.failed_trade_terminate = failed_trade_terminate
         self.max_episode_length = max_episode_length
         self.rl_platform = rl_platform
         self.debug = debug
@@ -189,6 +192,7 @@ class TradingEnv(gym.Env):
         self.holding_cum_gain = 0.0 # Cumulative gain since the start of the episode
         self.prev_close = 0.0 # Previous close price of the stock
         self.failed_buy = 0 # whether the buy failed
+        self.action_counter = 0
         # ---- Fetch Data ----
         self._init_data()
         extras = {}
@@ -463,6 +467,16 @@ class TradingEnv(gym.Env):
         # Normalize the gspc_5 prices
         gspc_5 = (gspc_5 - np.mean(gspc_5)) / np.std(gspc_5)
         
+        #current holding value
+        current_holding_value = 0
+        if self.has_position:
+            current_holding_value = self.current_holding_value
+        # Normalize the current holding value
+        current_holding_value = (current_holding_value - np.mean(stock_30)) / np.std(stock_30)
+        
+        #current networth
+        current_networth = (self.current_networth - np.mean(stock_30)) / np.std(stock_30)
+        
         # Privileged observation
         if self.extra_obs:
             base_obs = np.concatenate([
@@ -475,7 +489,7 @@ class TradingEnv(gym.Env):
                 [current_relative_gain],
                 [volume_change],
                 [gains_over_holding],
-                [position]
+                [position],
             ])
         else:
             base_obs = np.concatenate([
@@ -564,6 +578,8 @@ class TradingEnv(gym.Env):
             else:
                 self.bought_price = self.current_close
                 if self.current_networth < self.current_close * self.initial_shares:
+                    if self.failed_trade_terminate:
+                        terminated = True
                     # terminated = True
                     #means that trade doesn't go through [OVERRIDE]
                     self.sold_price = 0
@@ -574,6 +590,8 @@ class TradingEnv(gym.Env):
                     # self.current_holding_value = 0
                     self.sold_price = self.current_close
                     self.days_since_last_trade = 0
+            if self.failed_buy == 0:
+                self.action_counter += 1
         
         if self.current_networth < self.initial_networth * self.min_percnt:
             terminated = True
@@ -673,8 +691,8 @@ class TradingEnv(gym.Env):
         self.clipped_weighted_greedy = np.clip(self.weighted_greedy, -1, 1)
         self.clipped_holding_reward = np.clip(self.holding_reward, -1, 1)
         
-        curriculum_weight = self.curriculum_manager.get_curriculum("greedy_reward") 
-        if curriculum_weight is not None:
+        if self.curriculum_manager is not None:
+            curriculum_weight = self.curriculum_manager.get_curriculum("greedy_reward") 
             weight = curriculum_weight / self.curriculum_manager.get_max_steps()
             self.clipped_weighted_greedy = self.clipped_weighted_greedy * weight
         
