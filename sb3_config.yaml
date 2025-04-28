@@ -1,28 +1,31 @@
-name: "TradingEnv_50tickers_40M"
+name: "DummyTest"
 rl_platform: "SB3"
 period: "max"
 num_envs: 48
 num_steps: 1000
 num_priv_obs: 18
 batch_size: 128
-eval_steps: 1000
 ent_coef: 0.02
 gamma: 0.9693339928617053
 clip_range: 0.2151957180412349
 adaptive_lr: True
 lr: 3e-4
-total_timesteps: 40000000
+total_timesteps: 5000000
 # total_timesteps: 5000000
 log_dir: "./tensorboard_logs_refactored/"
-use_privileged_obs: False
+use_privileged_obs: True
 extra_obs: True
 min_percnt: 0.8
 device: "cpu"
 max_grad_norm: 0.5
-eval_freq: 100000
-extended_data: True
-# curriculum: ["greedy_reward"]
-# curriculum: None
 curriculum_step_size: 1
 curriculum_max_steps: 10
 failed_trade_terminate: True
+
+#eval stuff
+eval_freq: 100000
+eval_steps: 300
+extended_data: True
+eval_model: "models/Final-Models/TradingEnv_Priv_50tickers_Curriculum_40M.zip"
+# curriculum: ["greedy_reward"]
+# curriculum: None

@@ -315,8 +315,11 @@ class TradingEnv(gym.Env):
         #     print(f"[ERROR] Failed to fetch data for {self.current_stock}.")
         #     self.reset()
         self.ticker_index = np.random.randint(30, len(self.merged_data) - (self.eval_buffer + self.max_episode_length + 5))
+        # Ensure eval starts at a fixed point with enough history and future data within the slice
         if self.eval:
-            self.ticker_index = len(self.merged_data) - (self.eval_buffer + 5)
+            # Start after the initial 30 days needed for features (indices 0-29)
+            # Ensure there's enough data for max_episode_length steps within the slice
+            self.ticker_index = 30 # Start at the 31st data point (index 30)
         self.initial_buy_date = self.merged_data.index[self.ticker_index]
         self.initial_shares = np.random.randint(1, 11)
         self.initial_networth = self.initial_shares * self.merged_data['Close'].iloc[self.ticker_index]
